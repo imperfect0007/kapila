@@ -1,12 +1,16 @@
+import asyncio
 import logging
+import re
 import sys
-
 import os
+from contextlib import asynccontextmanager
+from datetime import datetime
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Query, HTTPException
 from fastapi.responses import PlainTextResponse
 import httpx
+from openpyxl import load_workbook
 
 load_dotenv(".env.local")
 
@@ -32,7 +36,201 @@ GRAPH_API_URL = (
     f"https://graph.facebook.com/v21.0/{PHONE_NUMBER_ID}/messages"
 )
 
-app = FastAPI(title="WhatsApp Enquiry Bot")
+BOOKING_FILE = os.path.join(os.path.dirname(__file__), "Kapila booking.xlsx")
+
+
+# ──────────────────────────────────────────────
+# Excel-based room availability
+# ──────────────────────────────────────────────
+ROOM_COLUMNS = ["Room 1", "Room 2", "Room 3", "Room 4", "Room 5"]
+
+DATE_PATTERNS = [
+    r"\b(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{4})\b",     # dd/mm/yyyy or dd-mm-yyyy
+    r"\b(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2})\b",       # dd/mm/yy
+    r"\b(\d{1,2})\s*(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*"
+    r"\s*(\d{4})?\b",                                     # 14 feb or 14 feb 2026
+    r"\b(\d{1,2})\s*(st|nd|rd|th)\s*(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*"
+    r"\s*(\d{4})?\b",                                     # 14th feb 2026
+]
+
+MONTH_MAP = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+
+
+def parse_date(text: str) -> datetime | None:
+    """Try to extract a date from free-form user text."""
+    t = text.lower().strip()
+    current_year = datetime.now().year
+
+    # dd/mm/yyyy or dd-mm-yyyy or dd.mm.yyyy
+    m = re.search(DATE_PATTERNS[0], t)
+    if m:
+        try:
+            return datetime(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+        except ValueError:
+            pass
+
+    # dd/mm/yy
+    m = re.search(DATE_PATTERNS[1], t)
+    if m:
+        try:
+            yr = int(m.group(3))
+            yr = yr + 2000 if yr < 100 else yr
+            return datetime(yr, int(m.group(2)), int(m.group(1)))
+        except ValueError:
+            pass
+
+    # 14th feb 2026 (with ordinal suffix)
+    m = re.search(DATE_PATTERNS[3], t)
+    if m:
+        try:
+            day = int(m.group(1))
+            mon = MONTH_MAP.get(m.group(3)[:3], 0)
+            yr = int(m.group(4)) if m.group(4) else current_year
+            return datetime(yr, mon, day)
+        except (ValueError, KeyError):
+            pass
+
+    # 14 feb or 14 feb 2026 (without ordinal)
+    m = re.search(DATE_PATTERNS[2], t)
+    if m:
+        try:
+            day = int(m.group(1))
+            mon = MONTH_MAP.get(m.group(2)[:3], 0)
+            yr = int(m.group(3)) if m.group(3) else current_year
+            return datetime(yr, mon, day)
+        except (ValueError, KeyError):
+            pass
+
+    return None
+
+
+def check_availability(target_date: datetime) -> str:
+    """
+    Look up target_date in the Excel sheet and return an availability message.
+    """
+    date_str = target_date.strftime("%d-%m-%Y")
+    display = target_date.strftime("%d %b %Y")
+
+    try:
+        wb = load_workbook(BOOKING_FILE, read_only=True, data_only=True)
+        ws = wb.active
+
+        headers = [cell.value for cell in next(ws.iter_rows(min_row=1, max_row=1))]
+        room_indices = [headers.index(r) for r in ROOM_COLUMNS if r in headers]
+
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            cell_date = row[0]
+            if cell_date is None:
+                continue
+
+            if isinstance(cell_date, datetime):
+                row_date_str = cell_date.strftime("%d-%m-%Y")
+            else:
+                row_date_str = str(cell_date).strip()
+
+            if row_date_str == date_str:
+                tariff_idx = headers.index("Tariff") if "Tariff" in headers else None
+                tariff = row[tariff_idx] if tariff_idx is not None else None
+
+                empty_rooms = sum(1 for i in room_indices if row[i] is None)
+                booked_rooms = len(room_indices) - empty_rooms
+
+                logger.info(
+                    "availability  | date=%s | booked=%s | empty=%s",
+                    date_str, booked_rooms, empty_rooms,
+                )
+
+                if empty_rooms > 0:
+                    tariff_line = (
+                        f"💰 Tariff: *₹{tariff:,.0f}* per room/night\n"
+                        if tariff else ""
+                    )
+                    return (
+                        f"✅ *Rooms available on {display}!*\n\n"
+                        f"🛏 Available: *{empty_rooms}* of 5 rooms\n"
+                        f"📌 Booked: {booked_rooms} of 5\n"
+                        f"{tariff_line}\n"
+                        "To book, please share:\n"
+                        "1️⃣ Number of guests\n"
+                        "2️⃣ Number of rooms\n"
+                        "3️⃣ Traveling with pets?\n\n"
+                        "Or type *book* for full booking details."
+                    )
+                else:
+                    return (
+                        f"❌ *Sorry, fully booked on {display}.*\n\n"
+                        "All 5 rooms are occupied on this date.\n\n"
+                        "💡 Try a nearby date or contact reception:\n"
+                        "📞 *+91-XXXXX-XXXXX*"
+                    )
+
+        wb.close()
+        return (
+            f"📅 *{display}*\n\n"
+            "We don't have this date in our booking sheet yet.\n"
+            "Please contact reception for availability:\n"
+            "📞 *+91-XXXXX-XXXXX*"
+        )
+
+    except FileNotFoundError:
+        logger.error("availability  | file not found: %s", BOOKING_FILE)
+        return (
+            "⚠️ Booking data is currently unavailable.\n"
+            "Please contact reception directly:\n"
+            "📞 *+91-XXXXX-XXXXX*"
+        )
+    except Exception as exc:
+        logger.exception("availability  | error reading Excel: %s", exc)
+        return (
+            "⚠️ Something went wrong while checking availability.\n"
+            "Please contact reception:\n"
+            "📞 *+91-XXXXX-XXXXX*"
+        )
+
+
+RENDER_URL = os.getenv("RENDER_EXTERNAL_URL", "")
+PING_INTERVAL = 14 * 60  # 14 minutes
+
+
+# ──────────────────────────────────────────────
+# Self-ping to keep Render awake
+# ──────────────────────────────────────────────
+async def keep_alive() -> None:
+    """Ping our own /ping endpoint every 14 minutes so Render doesn't sleep."""
+    if not RENDER_URL:
+        logger.warning("keep_alive    | RENDER_EXTERNAL_URL not set – self-ping disabled")
+        return
+
+    url = f"{RENDER_URL}/ping"
+    logger.info("keep_alive    | will ping %s every %ss", url, PING_INTERVAL)
+
+    while True:
+        await asyncio.sleep(PING_INTERVAL)
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(url, timeout=10)
+                logger.info("keep_alive    | pinged %s – status %s", url, resp.status_code)
+        except Exception as exc:
+            logger.error("keep_alive    | ping failed: %s", exc)
+
+
+@asynccontextmanager
+async def lifespan(application: FastAPI):
+    task = asyncio.create_task(keep_alive())
+    yield
+    task.cancel()
+
+
+app = FastAPI(title="WhatsApp Enquiry Bot", lifespan=lifespan)
+
+
+@app.get("/ping")
+async def ping():
+    """Health-check endpoint used by the self-ping task and uptime monitors."""
+    return {"status": "alive"}
 
 
 # ──────────────────────────────────────────────
@@ -140,13 +338,18 @@ def generate_reply(text: str) -> str:
 
     # ── Booking enquiry ──
     if any(w in t for w in ("book", "reserve", "available", "availability",
-                             "checkin", "check-in", "checkout", "check-out", "date")):
+                             "checkin", "check-in", "checkout", "check-out")):
         return (
             "📅 *Booking Enquiry*\n\n"
             "We'd love to host you at Kapila River Front! 🌿\n\n"
             "🕐 *Check-in:* 1:00 PM\n"
             "🕚 *Check-out:* 11:00 AM\n\n"
-            "To book, please share:\n"
+            "🔍 *Check availability instantly!*\n"
+            "Just send a date like:\n"
+            "• *20 mar 2026*\n"
+            "• *15/04/2026*\n"
+            "• *25th may 2026*\n\n"
+            "Or share your booking details:\n"
             "1️⃣ Check-in date\n"
             "2️⃣ Check-out date\n"
             "3️⃣ Number of guests\n"
@@ -579,8 +782,15 @@ async def receive_webhook(request: Request):
                         greetings = ("hi", "hello", "hey", "hii", "helo",
                                      "good morning", "good afternoon",
                                      "good evening")
+
+                        parsed = parse_date(text)
+
                         if text.lower().strip() in greetings:
                             await send_button_message(sender)
+                        elif parsed is not None:
+                            logger.info("webhook       | date detected: %s", parsed.strftime("%d-%m-%Y"))
+                            reply = check_availability(parsed)
+                            await send_message(sender, reply)
                         elif any(w in text.lower() for w in ("menu", "help", "option")):
                             await send_message(sender, generate_reply("menu"))
                             await send_button_message(sender)
