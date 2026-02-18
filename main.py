@@ -637,7 +637,7 @@ async def send_button_message(to: str) -> None:
         "A Luxury Farm Villa on the Riverside\n\n"
         "How may I assist you today?",
         [
-            {"type": "reply", "reply": {"id": "room", "title": "Room Details 🛏"}},
+            {"type": "reply", "reply": {"id": "availability", "title": "Availability 📅"}},
             {"type": "reply", "reply": {"id": "price", "title": "2026 Rate Card 💰"}},
             {"type": "reply", "reply": {"id": "more", "title": "More Options 📋"}},
         ],
@@ -645,14 +645,27 @@ async def send_button_message(to: str) -> None:
 
 
 async def send_more_options(to: str) -> None:
-    """Second menu – activities, pets, policies."""
+    """Second menu – room details, activities, pets, policies."""
     await _send_interactive(
         to,
         "More about *Kapila River Front* 🌿",
         [
+            {"type": "reply", "reply": {"id": "room", "title": "Room Details 🛏"}},
             {"type": "reply", "reply": {"id": "activities", "title": "Activities 🎯"}},
+            {"type": "reply", "reply": {"id": "pet_policies", "title": "Pet & Policies 🐾"}},
+        ],
+    )
+
+
+async def send_pet_policies_menu(to: str) -> None:
+    """Third menu – pet policy, cancellation, payment."""
+    await _send_interactive(
+        to,
+        "🐾 *Pet & Policies*",
+        [
             {"type": "reply", "reply": {"id": "pet", "title": "Pet Policy 🐾"}},
-            {"type": "reply", "reply": {"id": "policies", "title": "Policies 📄"}},
+            {"type": "reply", "reply": {"id": "cancel", "title": "Cancellation ❌"}},
+            {"type": "reply", "reply": {"id": "payment", "title": "Payment Info 🏦"}},
         ],
     )
 
@@ -677,13 +690,27 @@ async def handle_button_click(sender: str, button_id: str) -> None:
     """Route logic based on the button ID the user tapped."""
     logger.info("button_click  | from=%s | button_id=%s", sender, button_id)
 
-    if button_id == "price":
+    if button_id == "availability":
+        await send_message(
+            sender,
+            "📅 *Check Room Availability*\n\n"
+            "Send me a date and I'll instantly check "
+            "how many rooms are free!\n\n"
+            "You can type it in any format:\n"
+            "• *20 mar 2026*\n"
+            "• *15/04/2026*\n"
+            "• *25th may 2026*\n"
+            "• *01-06-2026*\n\n"
+            "Go ahead, send your date! 👇"
+        )
+
+    elif button_id == "price":
         await send_message(sender, generate_reply("price"))
         await send_button_message(sender)
 
     elif button_id == "room":
         await send_message(sender, generate_reply("room"))
-        await send_button_message(sender)
+        await send_more_options(sender)
 
     elif button_id == "activities":
         await send_message(sender, generate_reply("activities"))
@@ -691,18 +718,21 @@ async def handle_button_click(sender: str, button_id: str) -> None:
 
     elif button_id == "pet":
         await send_message(sender, generate_reply("pet"))
-        await send_more_options(sender)
+        await send_pet_policies_menu(sender)
 
     elif button_id == "cancel":
         await send_message(sender, generate_reply("cancel"))
-        await send_policies_menu(sender)
+        await send_pet_policies_menu(sender)
 
     elif button_id == "payment":
         await send_message(sender, generate_reply("payment"))
-        await send_policies_menu(sender)
+        await send_pet_policies_menu(sender)
 
     elif button_id == "more":
         await send_more_options(sender)
+
+    elif button_id == "pet_policies":
+        await send_pet_policies_menu(sender)
 
     elif button_id == "policies":
         await send_policies_menu(sender)
