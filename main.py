@@ -652,7 +652,7 @@ async def send_more_options(to: str) -> None:
         [
             {"type": "reply", "reply": {"id": "activities", "title": "Activities 🎯"}},
             {"type": "reply", "reply": {"id": "pet", "title": "Pet Policy 🐾"}},
-            {"type": "reply", "reply": {"id": "policies", "title": "Booking & Policies 📄"}},
+            {"type": "reply", "reply": {"id": "policies", "title": "Policies 📄"}},
         ],
     )
 
@@ -663,9 +663,9 @@ async def send_policies_menu(to: str) -> None:
         to,
         "📄 *Booking & Policies*",
         [
-            {"type": "reply", "reply": {"id": "cancel", "title": "Cancellation Policy ❌"}},
-            {"type": "reply", "reply": {"id": "payment", "title": "Payment Details 🏦"}},
-            {"type": "reply", "reply": {"id": "reception", "title": "Talk to Reception 👨‍💼"}},
+            {"type": "reply", "reply": {"id": "cancel", "title": "Cancellation ❌"}},
+            {"type": "reply", "reply": {"id": "payment", "title": "Payment Info 🏦"}},
+            {"type": "reply", "reply": {"id": "reception", "title": "Reception 👨‍💼"}},
         ],
     )
 
