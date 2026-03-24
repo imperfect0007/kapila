@@ -45,6 +45,16 @@ GRAPH_API_URL = (
     f"https://graph.facebook.com/v21.0/{PHONE_NUMBER_ID}/messages"
 )
 
+# Meta Cloud API: interactive reply buttons — max 3, title max 20 chars each.
+WHATSAPP_MAX_REPLY_BUTTONS = 3
+WHATSAPP_MAX_BUTTON_TITLE_LEN = 20
+
+# Comma-separated WhatsApp numbers (digits only, country code, no +) to receive
+# enquiry alerts (name, phone, dates, guests) so desk staff can call back.
+# Example: DESK_NOTIFY_WHATSAPP=919108138510,918214001100
+# Delivery follows Meta rules (recipient may need an open chat with your business).
+DESK_NOTIFY_WHATSAPP = os.getenv("DESK_NOTIFY_WHATSAPP", "").strip()
+
 # ── Guest contact (tap numbers in WhatsApp to call) ──
 CONTACT_NAME = "Kavitha"
 PHONE_KAVITHA = "+919108138510"
@@ -272,6 +282,7 @@ async def enquiry_form_post(
         "check_in": check_in,
         "check_out": check_out,
         "packs": packs,
+        "source": "web_form",
     }
     try:
         append_enquiry_record(record)
@@ -282,6 +293,7 @@ async def enquiry_form_post(
             status_code=500,
         )
 
+    await notify_desk_staff(record, "Website form")
     return _enquiry_thank_you()
 
 
@@ -660,6 +672,51 @@ async def send_message(to: str, message: str) -> None:
             logger.error("send_message  | request failed: %s", exc)
 
 
+def _normalize_whatsapp_digits(raw: str) -> str:
+    return "".join(c for c in (raw or "").strip() if c.isdigit())
+
+
+def format_desk_enquiry_alert(payload: dict, source_label: str) -> str:
+    """Plain-text summary for staff (no user-controlled * that could break formatting)."""
+    def _plain(s: object) -> str:
+        return str(s or "").replace("*", "").replace("_", "").strip()
+
+    name = _plain(payload.get("name"))
+    phone = _plain(payload.get("phone"))
+    cin = _plain(payload.get("check_in"))
+    cout = _plain(payload.get("check_out"))
+    packs = payload.get("packs", "")
+    return (
+        "🔔 *New enquiry — please call guest*\n\n"
+        f"📋 *Source:* {source_label}\n\n"
+        f"👤 *Name:* {name}\n"
+        f"📞 *Phone:* {phone}\n"
+        f"📅 *Check-in:* {cin}\n"
+        f"📅 *Check-out:* {cout}\n"
+        f"👥 *Total guests:* {packs}\n"
+    )
+
+
+async def notify_desk_staff(payload: dict, source_label: str) -> None:
+    """
+    Send the same enquiry details saved to enquiries.jsonl to desk WhatsApp number(s).
+    Set DESK_NOTIFY_WHATSAPP in the environment (comma-separated).
+    """
+    if not DESK_NOTIFY_WHATSAPP:
+        return
+    recipients: list[str] = []
+    for part in DESK_NOTIFY_WHATSAPP.split(","):
+        n = _normalize_whatsapp_digits(part)
+        if len(n) >= 10:
+            recipients.append(n)
+    if not recipients:
+        logger.warning("desk_notify     | DESK_NOTIFY_WHATSAPP has no valid numbers")
+        return
+    body = format_desk_enquiry_alert(payload, source_label)
+    for to in recipients:
+        await send_message(to, body)
+
+
 def parse_chat_date(text: str) -> date | None:
     """Parse YYYY-MM-DD or DD/MM/YYYY (or DD-MM-YYYY) from chat text."""
     t = (text or "").strip()
@@ -844,7 +901,22 @@ async def send_gallery_images(to: str, category: str) -> None:
 # Send interactive button menus via the Graph API
 # ──────────────────────────────────────────────
 async def _send_interactive(to: str, body_text: str, buttons: list[dict]) -> None:
-    """Low-level helper to send any interactive button message."""
+    """Low-level helper to send any interactive button message (Meta max 3 reply buttons)."""
+    if len(buttons) > WHATSAPP_MAX_REPLY_BUTTONS:
+        logger.warning(
+            "interactive   | truncating %s buttons to %s (Meta limit)",
+            len(buttons),
+            WHATSAPP_MAX_REPLY_BUTTONS,
+        )
+        buttons = buttons[:WHATSAPP_MAX_REPLY_BUTTONS]
+    for b in buttons:
+        title = (b.get("reply") or {}).get("title") or ""
+        if len(title) > WHATSAPP_MAX_BUTTON_TITLE_LEN:
+            logger.warning(
+                "interactive   | button title too long (%s): %s…",
+                len(title),
+                title[:24],
+            )
     headers = {
         "Authorization": f"Bearer {ACCESS_TOKEN}",
         "Content-Type": "application/json",
@@ -1066,6 +1138,7 @@ async def handle_callback_flow(sender: str, text: str) -> bool:
             )
             return True
         sessions.callback_clear_flow(sender)
+        await notify_desk_staff(record, "WhatsApp callback")
         await send_message(
             sender,
             "✅ *Thank you!* We’ve received your callback request:\n\n"
