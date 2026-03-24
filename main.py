@@ -1,16 +1,15 @@
 import asyncio
 import logging
-import re
 import sys
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime
+from urllib.parse import quote
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Query, HTTPException
 from fastapi.responses import PlainTextResponse
+from fastapi.staticfiles import StaticFiles
 import httpx
-from openpyxl import load_workbook
 
 load_dotenv(".env.local")
 
@@ -36,159 +35,34 @@ GRAPH_API_URL = (
     f"https://graph.facebook.com/v21.0/{PHONE_NUMBER_ID}/messages"
 )
 
-BOOKING_FILE = os.path.join(os.path.dirname(__file__), "Kapila booking.xlsx")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PHOTOS_ROOT = os.path.join(BASE_DIR, "photos")
+
+# Public HTTPS base for WhatsApp image links (e.g. https://your-app.onrender.com)
+PUBLIC_BASE_URL = (
+    os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
+    or os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
+)
+
+_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 
 
-# ──────────────────────────────────────────────
-# Excel-based room availability
-# ──────────────────────────────────────────────
-ROOM_COLUMNS = ["Room 1", "Room 2", "Room 3", "Room 4", "Room 5"]
-
-DATE_PATTERNS = [
-    r"\b(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{4})\b",     # dd/mm/yyyy or dd-mm-yyyy
-    r"\b(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2})\b",       # dd/mm/yy
-    r"\b(\d{1,2})\s*(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*"
-    r"\s*(\d{4})?\b",                                     # 14 feb or 14 feb 2026
-    r"\b(\d{1,2})\s*(st|nd|rd|th)\s*(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*"
-    r"\s*(\d{4})?\b",                                     # 14th feb 2026
-]
-
-MONTH_MAP = {
-    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
-    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
-}
+def list_gallery_filenames(category: str) -> list[str]:
+    """Return sorted image filenames under photos/<category>/."""
+    folder = os.path.join(PHOTOS_ROOT, category)
+    if not os.path.isdir(folder):
+        return []
+    names = []
+    for name in sorted(os.listdir(folder)):
+        path = os.path.join(folder, name)
+        if os.path.isfile(path) and os.path.splitext(name.lower())[1] in _IMAGE_EXTS:
+            names.append(name)
+    return names
 
 
-def parse_date(text: str) -> datetime | None:
-    """Try to extract a date from free-form user text."""
-    t = text.lower().strip()
-    current_year = datetime.now().year
-
-    # dd/mm/yyyy or dd-mm-yyyy or dd.mm.yyyy
-    m = re.search(DATE_PATTERNS[0], t)
-    if m:
-        try:
-            return datetime(int(m.group(3)), int(m.group(2)), int(m.group(1)))
-        except ValueError:
-            pass
-
-    # dd/mm/yy
-    m = re.search(DATE_PATTERNS[1], t)
-    if m:
-        try:
-            yr = int(m.group(3))
-            yr = yr + 2000 if yr < 100 else yr
-            return datetime(yr, int(m.group(2)), int(m.group(1)))
-        except ValueError:
-            pass
-
-    # 14th feb 2026 (with ordinal suffix)
-    m = re.search(DATE_PATTERNS[3], t)
-    if m:
-        try:
-            day = int(m.group(1))
-            mon = MONTH_MAP.get(m.group(3)[:3], 0)
-            yr = int(m.group(4)) if m.group(4) else current_year
-            return datetime(yr, mon, day)
-        except (ValueError, KeyError):
-            pass
-
-    # 14 feb or 14 feb 2026 (without ordinal)
-    m = re.search(DATE_PATTERNS[2], t)
-    if m:
-        try:
-            day = int(m.group(1))
-            mon = MONTH_MAP.get(m.group(2)[:3], 0)
-            yr = int(m.group(3)) if m.group(3) else current_year
-            return datetime(yr, mon, day)
-        except (ValueError, KeyError):
-            pass
-
-    return None
-
-
-def check_availability(target_date: datetime) -> str:
-    """
-    Look up target_date in the Excel sheet and return an availability message.
-    """
-    date_str = target_date.strftime("%d-%m-%Y")
-    display = target_date.strftime("%d %b %Y")
-
-    try:
-        wb = load_workbook(BOOKING_FILE, read_only=True, data_only=True)
-        ws = wb.active
-
-        headers = [cell.value for cell in next(ws.iter_rows(min_row=1, max_row=1))]
-        room_indices = [headers.index(r) for r in ROOM_COLUMNS if r in headers]
-
-        for row in ws.iter_rows(min_row=2, values_only=True):
-            cell_date = row[0]
-            if cell_date is None:
-                continue
-
-            if isinstance(cell_date, datetime):
-                row_date_str = cell_date.strftime("%d-%m-%Y")
-            else:
-                row_date_str = str(cell_date).strip()
-
-            if row_date_str == date_str:
-                tariff_idx = headers.index("Tariff") if "Tariff" in headers else None
-                tariff = row[tariff_idx] if tariff_idx is not None else None
-
-                empty_rooms = sum(1 for i in room_indices if row[i] is None)
-                booked_rooms = len(room_indices) - empty_rooms
-
-                logger.info(
-                    "availability  | date=%s | booked=%s | empty=%s",
-                    date_str, booked_rooms, empty_rooms,
-                )
-
-                if empty_rooms > 0:
-                    tariff_line = (
-                        f"💰 Tariff: *₹{tariff:,.0f}* per room/night\n"
-                        if tariff else ""
-                    )
-                    return (
-                        f"✅ *Rooms available on {display}!*\n\n"
-                        f"🛏 Available: *{empty_rooms}* of 5 rooms\n"
-                        f"📌 Booked: {booked_rooms} of 5\n"
-                        f"{tariff_line}\n"
-                        "To book, please share:\n"
-                        "1️⃣ Number of guests\n"
-                        "2️⃣ Number of rooms\n"
-                        "3️⃣ Traveling with pets?\n\n"
-                        "Or type *book* for full booking details."
-                    )
-                else:
-                    return (
-                        f"❌ *Sorry, fully booked on {display}.*\n\n"
-                        "All 5 rooms are occupied on this date.\n\n"
-                        "💡 Try a nearby date or contact reception:\n"
-                        "📞 *+91-XXXXX-XXXXX*"
-                    )
-
-        wb.close()
-        return (
-            f"📅 *{display}*\n\n"
-            "We don't have this date in our booking sheet yet.\n"
-            "Please contact reception for availability:\n"
-            "📞 *+91-XXXXX-XXXXX*"
-        )
-
-    except FileNotFoundError:
-        logger.error("availability  | file not found: %s", BOOKING_FILE)
-        return (
-            "⚠️ Booking data is currently unavailable.\n"
-            "Please contact reception directly:\n"
-            "📞 *+91-XXXXX-XXXXX*"
-        )
-    except Exception as exc:
-        logger.exception("availability  | error reading Excel: %s", exc)
-        return (
-            "⚠️ Something went wrong while checking availability.\n"
-            "Please contact reception:\n"
-            "📞 *+91-XXXXX-XXXXX*"
-        )
+def public_photo_url(category: str, filename: str) -> str:
+    """Build absolute URL for a file served at /photos/<category>/<filename>."""
+    return f"{PUBLIC_BASE_URL}/photos/{category}/{quote(filename)}"
 
 
 RENDER_URL = os.getenv("RENDER_EXTERNAL_URL", "")
@@ -226,6 +100,11 @@ async def lifespan(application: FastAPI):
 
 app = FastAPI(title="WhatsApp Enquiry Bot", lifespan=lifespan)
 
+if os.path.isdir(PHOTOS_ROOT):
+    app.mount("/photos", StaticFiles(directory=PHOTOS_ROOT), name="photos")
+else:
+    logger.warning("photos        | folder missing: %s", PHOTOS_ROOT)
+
 
 @app.get("/ping")
 async def ping():
@@ -246,6 +125,7 @@ def generate_reply(text: str) -> str:
             "Welcome to *Kapila River Front*! 🌿🏨\n"
             "A Luxury Farm Villa on the Riverside\n\n"
             "Here's what I can help you with:\n"
+            "📸 *gallery* – Photo gallery (indoor / outdoor / activities)\n"
             "🛏 *room* – Room details\n"
             "💰 *price* – 2026 Rate card\n"
             "📅 *book* – Booking enquiry\n"
@@ -337,19 +217,14 @@ def generate_reply(text: str) -> str:
         )
 
     # ── Booking enquiry ──
-    if any(w in t for w in ("book", "reserve", "available", "availability",
-                             "checkin", "check-in", "checkout", "check-out")):
+    if any(w in t for w in ("book", "reserve", "checkin", "check-in",
+                             "checkout", "check-out")):
         return (
             "📅 *Booking Enquiry*\n\n"
             "We'd love to host you at Kapila River Front! 🌿\n\n"
             "🕐 *Check-in:* 1:00 PM\n"
             "🕚 *Check-out:* 11:00 AM\n\n"
-            "🔍 *Check availability instantly!*\n"
-            "Just send a date like:\n"
-            "• *20 mar 2026*\n"
-            "• *15/04/2026*\n"
-            "• *25th may 2026*\n\n"
-            "Or share your booking details:\n"
+            "Please share:\n"
             "1️⃣ Check-in date\n"
             "2️⃣ Check-out date\n"
             "3️⃣ Number of guests\n"
@@ -537,6 +412,7 @@ def generate_reply(text: str) -> str:
     if any(w in t for w in ("menu", "help", "option", "what can")):
         return (
             "📋 *Here's everything I can help with:*\n\n"
+            "📸 *gallery* – Photos (indoor / outdoor / activities)\n"
             "🛏 *room* – Room details & features\n"
             "💰 *price* – 2026 Rate card\n"
             "🎆 *newyear* – NYE special package\n"
@@ -559,6 +435,7 @@ def generate_reply(text: str) -> str:
         "Thank you for reaching out to "
         "*Kapila River Front*! 🌿\n\n"
         "I can help you with:\n"
+        "📸 *gallery* – Photo gallery\n"
         "🛏 *room* – Room info\n"
         "💰 *price* – 2026 Rates\n"
         "📅 *book* – Booking enquiry\n"
@@ -596,6 +473,82 @@ async def send_message(to: str, message: str) -> None:
             logger.info("send_message  | response=%s", response.text)
         except httpx.RequestError as exc:
             logger.error("send_message  | request failed: %s", exc)
+
+
+async def send_image(to: str, image_url: str, caption: str | None = None) -> None:
+    """Send an image by public HTTPS URL (WhatsApp Cloud API)."""
+    headers = {
+        "Authorization": f"Bearer {ACCESS_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    image_obj: dict = {"link": image_url}
+    if caption:
+        image_obj["caption"] = caption
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "image",
+        "image": image_obj,
+    }
+
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(
+                GRAPH_API_URL, headers=headers, json=payload
+            )
+            logger.info("send_image    | to=%s | status=%s", to, response.status_code)
+            logger.info("send_image    | response=%s", response.text)
+        except httpx.RequestError as exc:
+            logger.error("send_image    | request failed: %s", exc)
+
+
+GALLERY_LABELS = {
+    "indoor": "Indoor",
+    "outdoor": "Outdoor",
+    "activities": "Activities",
+}
+
+
+async def send_gallery_images(to: str, category: str) -> None:
+    """Send all images from photos/<category>/ via public URLs."""
+    if category not in GALLERY_LABELS:
+        logger.warning("gallery       | unknown category: %s", category)
+        return
+
+    if not PUBLIC_BASE_URL:
+        logger.error("gallery       | PUBLIC_BASE_URL / RENDER_EXTERNAL_URL not set")
+        await send_message(
+            to,
+            "⚠️ Gallery links are not configured on the server.\n"
+            "Please contact reception: *+91-XXXXX-XXXXX*"
+        )
+        return
+
+    filenames = list_gallery_filenames(category)
+    label = GALLERY_LABELS[category]
+
+    if not filenames:
+        logger.info("gallery       | no images in category=%s", category)
+        await send_message(
+            to,
+            f"No photos in *{label}* yet.\n"
+            "📞 *+91-XXXXX-XXXXX*"
+        )
+        return
+
+    logger.info("gallery       | sending %s images for %s", len(filenames), category)
+    await send_message(
+        to,
+        f"📸 *{label}* – sending {len(filenames)} photo(s)...",
+    )
+
+    for i, name in enumerate(filenames, 1):
+        url = public_photo_url(category, name)
+        cap = f"Kapila – {label} ({i}/{len(filenames)})"
+        await send_image(to, url, caption=cap)
+        await asyncio.sleep(0.4)
+
+    await send_gallery_menu(to)
 
 
 # ──────────────────────────────────────────────
@@ -637,9 +590,22 @@ async def send_button_message(to: str) -> None:
         "A Luxury Farm Villa on the Riverside\n\n"
         "How may I assist you today?",
         [
-            {"type": "reply", "reply": {"id": "availability", "title": "Availability 📅"}},
+            {"type": "reply", "reply": {"id": "gallery", "title": "Gallery 📸"}},
             {"type": "reply", "reply": {"id": "price", "title": "2026 Rate Card 💰"}},
             {"type": "reply", "reply": {"id": "more", "title": "More Options 📋"}},
+        ],
+    )
+
+
+async def send_gallery_menu(to: str) -> None:
+    """Sub-menu: indoor / outdoor / activities photos."""
+    await _send_interactive(
+        to,
+        "📸 *Photo Gallery*\nChoose a category:",
+        [
+            {"type": "reply", "reply": {"id": "gal_indoor", "title": "Indoor 🏠"}},
+            {"type": "reply", "reply": {"id": "gal_outdoor", "title": "Outdoor 🌿"}},
+            {"type": "reply", "reply": {"id": "gal_activities", "title": "Activities 🎯"}},
         ],
     )
 
@@ -690,19 +656,17 @@ async def handle_button_click(sender: str, button_id: str) -> None:
     """Route logic based on the button ID the user tapped."""
     logger.info("button_click  | from=%s | button_id=%s", sender, button_id)
 
-    if button_id == "availability":
-        await send_message(
-            sender,
-            "📅 *Check Room Availability*\n\n"
-            "Send me a date and I'll instantly check "
-            "how many rooms are free!\n\n"
-            "You can type it in any format:\n"
-            "• *20 mar 2026*\n"
-            "• *15/04/2026*\n"
-            "• *25th may 2026*\n"
-            "• *01-06-2026*\n\n"
-            "Go ahead, send your date! 👇"
-        )
+    if button_id == "gallery":
+        await send_gallery_menu(sender)
+
+    elif button_id == "gal_indoor":
+        await send_gallery_images(sender, "indoor")
+
+    elif button_id == "gal_outdoor":
+        await send_gallery_images(sender, "outdoor")
+
+    elif button_id == "gal_activities":
+        await send_gallery_images(sender, "activities")
 
     elif button_id == "price":
         await send_message(sender, generate_reply("price"))
@@ -776,15 +740,8 @@ async def verify_webhook(
 # ──────────────────────────────────────────────
 # Webhook receiver (POST)
 # ──────────────────────────────────────────────
-@app.post("/webhook")
-async def receive_webhook(request: Request):
-    """
-    Receives incoming messages from WhatsApp, generates a reply,
-    and sends it back to the sender.
-    """
-    body = await request.json()
-    logger.info("webhook       | incoming payload: %s", body)
-
+async def process_webhook_payload(body: dict) -> None:
+    """Handle WhatsApp messages (runs in background after 200 OK)."""
     try:
         entry = body.get("entry", [])
         for e in entry:
@@ -812,16 +769,17 @@ async def receive_webhook(request: Request):
                         greetings = ("hi", "hello", "hey", "hii", "helo",
                                      "good morning", "good afternoon",
                                      "good evening")
-
-                        parsed = parse_date(text)
+                        tl = text.lower()
 
                         if text.lower().strip() in greetings:
                             await send_button_message(sender)
-                        elif parsed is not None:
-                            logger.info("webhook       | date detected: %s", parsed.strftime("%d-%m-%Y"))
-                            reply = check_availability(parsed)
-                            await send_message(sender, reply)
-                        elif any(w in text.lower() for w in ("menu", "help", "option")):
+                        elif any(
+                            k in tl
+                            for k in ("gallery", "photo", "photos", "picture", "pictures")
+                        ):
+                            logger.info("webhook       | gallery keyword from text")
+                            await send_gallery_menu(sender)
+                        elif any(w in tl for w in ("menu", "help", "option")):
                             await send_message(sender, generate_reply("menu"))
                             await send_button_message(sender)
                         else:
@@ -838,4 +796,14 @@ async def receive_webhook(request: Request):
     except Exception as exc:
         logger.exception("webhook       | error processing message: %s", exc)
 
+
+@app.post("/webhook")
+async def receive_webhook(request: Request):
+    """
+    Receives incoming messages from WhatsApp.
+    Responds immediately so Meta does not time out during gallery sends.
+    """
+    body = await request.json()
+    logger.info("webhook       | incoming payload: %s", body)
+    asyncio.create_task(process_webhook_payload(body))
     return {"status": "ok"}
