@@ -35,6 +35,18 @@ GRAPH_API_URL = (
     f"https://graph.facebook.com/v21.0/{PHONE_NUMBER_ID}/messages"
 )
 
+# ── Guest contact (tap numbers in WhatsApp to call) ──
+CONTACT_NAME = "Kavitha"
+PHONE_KAVITHA = "+919108138510"
+PHONE_KAVITHA_ALT = "+919606654482"
+PHONE_RECEPTION_24_7 = "+918214001100"
+
+CONTACT_PHONE_LINES = (
+    f"📞 *{CONTACT_NAME} (primary):* {PHONE_KAVITHA}\n"
+    f"📞 *Alternate:* {PHONE_KAVITHA_ALT}\n"
+    f"📞 *24/7 reception:* {PHONE_RECEPTION_24_7}"
+)
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PHOTOS_ROOT = os.path.join(BASE_DIR, "photos")
 
@@ -136,7 +148,9 @@ def generate_reply(text: str) -> str:
             "📍 *location* – How to reach us\n"
             "❌ *cancel* – Cancellation policy\n"
             "🏦 *payment* – Bank & payment info\n"
-            "📋 *menu* – Full keyword list\n\n"
+            "📋 *menu* – Full keyword list\n"
+            "📞 *call* / *kavitha* – Phone numbers & contact card\n\n"
+            "Or use the buttons — last one is *Call Kavitha* 📞\n\n"
             "Or just type your question! 😊"
         )
 
@@ -230,7 +244,7 @@ def generate_reply(text: str) -> str:
             "3️⃣ Number of guests\n"
             "4️⃣ Number of rooms needed\n"
             "5️⃣ Traveling with pets? (Yes/No)\n\n"
-            "📞 Or call reception: *+91-XXXXX-XXXXX*\n\n"
+            f"📞 Or call us:\n{CONTACT_PHONE_LINES}\n\n"
             "✅ Booking is confirmed only after *100% payment*.\n"
             "Type *cancel* for cancellation policy.\n"
             "Type *payment* for bank details."
@@ -268,8 +282,8 @@ def generate_reply(text: str) -> str:
             "• *14–15 days* before → *25% deducted*\n"
             "• *10 days* before → *50% deducted*\n"
             "• *Less than 7 days* → *No refund*\n\n"
-            "For any changes to your booking, please contact reception:\n"
-            "📞 *+91-XXXXX-XXXXX*"
+            "For any changes to your booking, please contact us:\n"
+            f"{CONTACT_PHONE_LINES}"
         )
 
     # ── Payment / bank details ──
@@ -286,7 +300,7 @@ def generate_reply(text: str) -> str:
             "✅ Booking is confirmed only after *100% payment*.\n\n"
             "After payment, please share the screenshot here "
             "or send it to our reception.\n"
-            "📞 *+91-XXXXX-XXXXX*"
+            f"{CONTACT_PHONE_LINES}"
         )
 
     # ── Outdoor sports & activities ──
@@ -357,8 +371,8 @@ def generate_reply(text: str) -> str:
             "Kapila River Front is a luxury farm villa "
             "on the riverside near Mysore.\n\n"
             "📌 For exact location & Google Maps pin, "
-            "please contact our reception:\n"
-            "📞 *+91-XXXXX-XXXXX*\n\n"
+            "please contact us:\n"
+            f"{CONTACT_PHONE_LINES}\n\n"
             "We'll share the directions right away! 🗺"
         )
 
@@ -374,8 +388,8 @@ def generate_reply(text: str) -> str:
             "🍽 Dinner\n"
             "🥞 Breakfast (next morning)\n\n"
             "For special dietary needs or meal preferences, "
-            "please inform reception in advance:\n"
-            "📞 *+91-XXXXX-XXXXX*"
+            "please inform us in advance:\n"
+            f"{CONTACT_PHONE_LINES}"
         )
 
     # ── Valentine's Day ──
@@ -426,7 +440,8 @@ def generate_reply(text: str) -> str:
             "📍 *location* – How to reach us\n"
             "❌ *cancel* – Cancellation policy\n"
             "🏦 *payment* – Bank details\n"
-            "👨‍💼 *reception* – Talk to a person\n\n"
+            "📞 *call* / *kavitha* – Tap-to-call numbers\n"
+            "👨‍💼 *reception* – Reception desk\n\n"
             "Just type any keyword! 😊"
         )
 
@@ -475,6 +490,66 @@ async def send_message(to: str, message: str) -> None:
             logger.error("send_message  | request failed: %s", exc)
 
 
+async def send_contact_card(to: str) -> None:
+    """Send a vCard-style contact (WhatsApp lets users tap numbers to call)."""
+    headers = {
+        "Authorization": f"Bearer {ACCESS_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "contacts",
+        "contacts": [
+            {
+                "name": {
+                    "formatted_name": f"{CONTACT_NAME} – Kapila River Front",
+                    "first_name": CONTACT_NAME,
+                    "last_name": "Reservations",
+                },
+                "org": {
+                    "company": "Kapila River Front",
+                    "title": "Reservations",
+                },
+                "phones": [
+                    {
+                        "phone": PHONE_KAVITHA,
+                        "type": "CELL",
+                        "wa_id": "919108138510",
+                    },
+                    {"phone": PHONE_KAVITHA_ALT, "type": "WORK"},
+                    {"phone": PHONE_RECEPTION_24_7, "type": "MAIN"},
+                ],
+            }
+        ],
+    }
+
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(
+                GRAPH_API_URL, headers=headers, json=payload
+            )
+            logger.info("send_contact  | to=%s | status=%s", to, response.status_code)
+            logger.info("send_contact  | response=%s", response.text)
+        except httpx.RequestError as exc:
+            logger.error("send_contact  | request failed: %s", exc)
+
+
+async def send_kavitha_call_help(to: str) -> None:
+    """Contact card + text with tappable E.164 numbers (opens phone dialer on tap)."""
+    await send_contact_card(to)
+    await send_message(
+        to,
+        "☎️ *Call Kavitha*\n\n"
+        "Tap any *+91…* number in the contact card above or below — "
+        "your phone will open a normal voice call.\n\n"
+        f"{PHONE_KAVITHA}\n"
+        f"{PHONE_KAVITHA_ALT}\n"
+        f"{PHONE_RECEPTION_24_7}\n\n"
+        "_Primary · Alternate · 24/7 reception_",
+    )
+
+
 async def send_image(to: str, image_url: str, caption: str | None = None) -> None:
     """Send an image by public HTTPS URL (WhatsApp Cloud API)."""
     headers = {
@@ -520,7 +595,7 @@ async def send_gallery_images(to: str, category: str) -> None:
         await send_message(
             to,
             "⚠️ Gallery links are not configured on the server.\n"
-            "Please contact reception: *+91-XXXXX-XXXXX*"
+            f"Please contact us:\n{CONTACT_PHONE_LINES}"
         )
         return
 
@@ -531,8 +606,7 @@ async def send_gallery_images(to: str, category: str) -> None:
         logger.info("gallery       | no images in category=%s", category)
         await send_message(
             to,
-            f"No photos in *{label}* yet.\n"
-            "📞 *+91-XXXXX-XXXXX*"
+            f"No photos in *{label}* yet.\n{CONTACT_PHONE_LINES}"
         )
         return
 
@@ -592,7 +666,7 @@ async def send_button_message(to: str) -> None:
         [
             {"type": "reply", "reply": {"id": "gallery", "title": "Gallery 📸"}},
             {"type": "reply", "reply": {"id": "price", "title": "2026 Rate Card 💰"}},
-            {"type": "reply", "reply": {"id": "more", "title": "More Options 📋"}},
+            {"type": "reply", "reply": {"id": "contact_kavitha", "title": "Call Kavitha 📞"}},
         ],
     )
 
@@ -659,6 +733,10 @@ async def handle_button_click(sender: str, button_id: str) -> None:
     if button_id == "gallery":
         await send_gallery_menu(sender)
 
+    elif button_id == "contact_kavitha":
+        await send_kavitha_call_help(sender)
+        await send_button_message(sender)
+
     elif button_id == "gal_indoor":
         await send_gallery_images(sender, "indoor")
 
@@ -704,11 +782,10 @@ async def handle_button_click(sender: str, button_id: str) -> None:
     elif button_id == "reception":
         await send_message(
             sender,
-            "👨‍💼 *Connecting you to our reception!*\n\n"
-            "📞 Call us: *+91-XXXXX-XXXXX*\n"
-            "💬 WhatsApp: *+91-XXXXX-XXXXX*\n\n"
-            "Our team (Prajwal – Reservation Team) "
-            "will assist you right away! 🙏"
+            "👨‍💼 *Kapila River Front – Reception*\n\n"
+            f"{CONTACT_PHONE_LINES}\n\n"
+            "Tap any number to call. "
+            f"*{CONTACT_NAME}* and our team are happy to help 24/7. 🙏"
         )
 
     else:
@@ -781,6 +858,14 @@ async def process_webhook_payload(body: dict) -> None:
                             await send_gallery_menu(sender)
                         elif any(w in tl for w in ("menu", "help", "option")):
                             await send_message(sender, generate_reply("menu"))
+                            await send_button_message(sender)
+                        elif tl.strip() in ("more", "more options"):
+                            await send_more_options(sender)
+                        elif any(
+                            tl.strip() == w
+                            for w in ("call", "kavitha", "contact", "phone", "call kavitha")
+                        ) or "call kavitha" in tl:
+                            await send_kavitha_call_help(sender)
                             await send_button_message(sender)
                         else:
                             reply = generate_reply(text)
