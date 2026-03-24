@@ -15,6 +15,14 @@ logger = logging.getLogger("whatsapp-bot")
 
 SESSION_TTL = timedelta(hours=24)
 
+# WhatsApp “Get callback” multi-step flow (per wa_id)
+CALLBACK_IDLE = "idle"
+CALLBACK_NAME = "name"
+CALLBACK_PHONE = "phone"
+CALLBACK_CHECKIN = "checkin"
+CALLBACK_CHECKOUT = "checkout"
+CALLBACK_PACKS = "packs"
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -26,6 +34,11 @@ class UserSession:
     updated_at: datetime = field(default_factory=_utcnow)
     message_count: int = 0
     last_flow: str = ""
+    callback_step: str = CALLBACK_IDLE
+    cb_name: str = ""
+    cb_phone: str = ""
+    cb_checkin: str = ""  # YYYY-MM-DD
+    cb_checkout: str = ""
 
 
 _sessions: dict[str, UserSession] = {}
@@ -79,3 +92,105 @@ def snapshot_stats() -> dict:
 def get_session(wa_id: str) -> UserSession | None:
     with _lock:
         return _sessions.get(wa_id)
+
+
+def callback_step_for(wa_id: str) -> str:
+    with _lock:
+        s = _sessions.get(wa_id)
+        return s.callback_step if s else CALLBACK_IDLE
+
+
+def _callback_reset_unlocked(s: UserSession) -> None:
+    s.callback_step = CALLBACK_IDLE
+    s.cb_name = s.cb_phone = s.cb_checkin = s.cb_checkout = ""
+
+
+def callback_abort(wa_id: str) -> None:
+    with _lock:
+        s = _sessions.get(wa_id)
+        if s:
+            _callback_reset_unlocked(s)
+            s.updated_at = _utcnow()
+
+
+def callback_begin(wa_id: str) -> None:
+    with _lock:
+        _prune_stale_unlocked()
+        s = _sessions.get(wa_id)
+        if s is None:
+            s = UserSession(wa_id=wa_id)
+            _sessions[wa_id] = s
+        s.callback_step = CALLBACK_NAME
+        s.cb_name = s.cb_phone = s.cb_checkin = s.cb_checkout = ""
+        s.updated_at = _utcnow()
+
+
+def callback_after_name(wa_id: str, name: str) -> None:
+    with _lock:
+        s = _sessions.get(wa_id)
+        if not s:
+            return
+        s.cb_name = name
+        s.callback_step = CALLBACK_PHONE
+        s.updated_at = _utcnow()
+
+
+def callback_after_phone(wa_id: str, phone: str) -> None:
+    with _lock:
+        s = _sessions.get(wa_id)
+        if not s:
+            return
+        s.cb_phone = phone
+        s.callback_step = CALLBACK_CHECKIN
+        s.updated_at = _utcnow()
+
+
+def callback_after_checkin(wa_id: str, checkin_iso: str) -> None:
+    with _lock:
+        s = _sessions.get(wa_id)
+        if not s:
+            return
+        s.cb_checkin = checkin_iso
+        s.callback_step = CALLBACK_CHECKOUT
+        s.updated_at = _utcnow()
+
+
+def callback_after_checkout(wa_id: str, checkout_iso: str) -> None:
+    with _lock:
+        s = _sessions.get(wa_id)
+        if not s:
+            return
+        s.cb_checkout = checkout_iso
+        s.callback_step = CALLBACK_PACKS
+        s.updated_at = _utcnow()
+
+
+def callback_get_checkin_iso(wa_id: str) -> str:
+    with _lock:
+        s = _sessions.get(wa_id)
+        return s.cb_checkin if s else ""
+
+
+def callback_make_record(wa_id: str, packs: int) -> dict | None:
+    """If in packs step, build enquiry payload (does not clear state)."""
+    with _lock:
+        s = _sessions.get(wa_id)
+        if not s or s.callback_step != CALLBACK_PACKS:
+            return None
+        return {
+            "name": s.cb_name,
+            "phone": s.cb_phone,
+            "check_in": s.cb_checkin,
+            "check_out": s.cb_checkout,
+            "packs": packs,
+            "source": "whatsapp_callback",
+        }
+
+
+def callback_clear_flow(wa_id: str) -> None:
+    """Clear callback state after a successful save."""
+    with _lock:
+        s = _sessions.get(wa_id)
+        if s:
+            _callback_reset_unlocked(s)
+            s.updated_at = _utcnow()

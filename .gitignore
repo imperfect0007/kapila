@@ -36,6 +36,9 @@ Desktop.ini
 # Logs
 *.log
 
+# Form submissions (may contain PII)
+data/enquiries.jsonl
+
 # Testing
 .pytest_cache/
 htmlcov/

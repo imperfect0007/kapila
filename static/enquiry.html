@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Booking enquiry — Kapila River Front</title>
+  <meta name="description" content="Submit your stay enquiry at Kapila River Front, a luxury farm villa on the riverside.">
+  <style>
+    :root {
+      --bg: #f6f3ee;
+      --card: #fffdf9;
+      --text: #1c1914;
+      --muted: #5c574d;
+      --accent: #2d5a3d;
+      --accent2: #8b6914;
+      --border: #e0d8cc;
+      --focus: #2d5a3d;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: Georgia, "Times New Roman", serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+    }
+    .wrap {
+      max-width: 32rem;
+      margin: 0 auto;
+      padding: 2rem 1.25rem 3rem;
+    }
+    header {
+      text-align: center;
+      margin-bottom: 2rem;
+    }
+    header h1 {
+      font-size: 1.5rem;
+      font-weight: 600;
+      margin: 0 0 0.35rem;
+      letter-spacing: 0.02em;
+    }
+    header p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+    form {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1.5rem 1.25rem 1.75rem;
+      box-shadow: 0 8px 28px rgba(28, 25, 20, 0.06);
+    }
+    fieldset {
+      border: none;
+      margin: 0;
+      padding: 0;
+    }
+    legend {
+      font-weight: 600;
+      font-size: 1.05rem;
+      margin-bottom: 1rem;
+      color: var(--accent);
+    }
+    label {
+      display: block;
+      margin-top: 1rem;
+      font-size: 0.9rem;
+      color: var(--muted);
+    }
+    label:first-of-type { margin-top: 0; }
+    .hint {
+      font-size: 0.8rem;
+      color: var(--muted);
+      margin-top: 0.2rem;
+    }
+    input[type="text"],
+    input[type="tel"],
+    input[type="number"],
+    input[type="date"] {
+      width: 100%;
+      margin-top: 0.35rem;
+      padding: 0.65rem 0.75rem;
+      font-size: 1rem;
+      font-family: inherit;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #fff;
+      color: var(--text);
+    }
+    input:focus {
+      outline: 2px solid var(--focus);
+      outline-offset: 1px;
+    }
+    button[type="submit"] {
+      margin-top: 1.5rem;
+      width: 100%;
+      padding: 0.85rem 1rem;
+      font-size: 1rem;
+      font-family: inherit;
+      font-weight: 600;
+      color: #fff;
+      background: var(--accent);
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+    button[type="submit"]:hover {
+      filter: brightness(1.05);
+    }
+    footer {
+      margin-top: 2rem;
+      text-align: center;
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+    a { color: var(--accent2); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Kapila River Front</h1>
+      <p>Luxury farm villa · Riverside stay</p>
+    </header>
+
+    <form method="post" action="/enquiry" enctype="application/x-www-form-urlencoded">
+      <fieldset>
+        <legend>Booking enquiry</legend>
+
+        <label for="name">Full name <abbr title="required">*</abbr></label>
+        <input id="name" name="name" type="text" autocomplete="name" required minlength="2" maxlength="120" placeholder="Your name">
+
+        <label for="phone">Phone number <abbr title="required">*</abbr></label>
+        <input id="phone" name="phone" type="tel" autocomplete="tel" required minlength="8" maxlength="20" placeholder="e.g. 9876543210" inputmode="numeric">
+        <p class="hint">We’ll call or WhatsApp you on this number.</p>
+
+        <label for="check_in">Check-in date <abbr title="required">*</abbr></label>
+        <input id="check_in" name="check_in" type="date" required>
+
+        <label for="check_out">Check-out date <abbr title="required">*</abbr></label>
+        <input id="check_out" name="check_out" type="date" required>
+
+        <label for="packs">Guests (packs) <abbr title="required">*</abbr></label>
+        <input id="packs" name="packs" type="number" required min="1" max="30" step="1" placeholder="Number of guests">
+        <p class="hint">Total people in your group (min 2 per room, max 3 per room at the property).</p>
+      </fieldset>
+
+      <button type="submit">Submit enquiry</button>
+    </form>
+
+    <footer>
+      <p>Prefer WhatsApp? Message us from your phone.</p>
+    </footer>
+  </div>
+</body>
+</html>

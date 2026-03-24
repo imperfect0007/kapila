@@ -1,14 +1,17 @@
 import asyncio
+import html
 import json
 import logging
+import re
 import sys
 import os
 from contextlib import asynccontextmanager
+from datetime import date, datetime, timezone
 from urllib.parse import quote
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request, Query, HTTPException, Header
-from fastapi.responses import PlainTextResponse
+from fastapi import FastAPI, Request, Query, HTTPException, Header, Form
+from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 import httpx
 
@@ -56,6 +59,8 @@ CONTACT_PHONE_LINES = (
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PHOTOS_ROOT = os.path.join(BASE_DIR, "photos")
+DATA_DIR = os.path.join(BASE_DIR, "data")
+ENQUIRY_LOG = os.path.join(DATA_DIR, "enquiries.jsonl")
 
 # Public HTTPS base for WhatsApp image links (e.g. https://your-app.onrender.com)
 PUBLIC_BASE_URL = (
@@ -155,6 +160,132 @@ async def session_stats(
 
 
 # ──────────────────────────────────────────────
+# Web enquiry form (W3C HTML5) — submissions stored as JSON Lines
+# ──────────────────────────────────────────────
+def _ensure_data_dir() -> None:
+    os.makedirs(DATA_DIR, mode=0o755, exist_ok=True)
+
+
+def append_enquiry_record(payload: dict) -> None:
+    _ensure_data_dir()
+    payload["received_at"] = datetime.now(timezone.utc).isoformat()
+    with open(ENQUIRY_LOG, "a", encoding="utf-8") as f:
+        f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    logger.info(
+        "enquiry       | saved name=%s check_in=%s packs=%s",
+        payload.get("name"),
+        payload.get("check_in"),
+        payload.get("packs"),
+    )
+
+
+def _enquiry_form_error(message: str, status_code: int = 400) -> HTMLResponse:
+    safe = html.escape(message)
+    return HTMLResponse(
+        f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Enquiry error</title>
+<style>body{{font-family:Georgia,serif;max-width:28rem;margin:2rem auto;padding:1rem;color:#1c1914;}}
+a{{color:#2d5a3d}}</style></head><body>
+<p><strong>Could not submit.</strong> {safe}</p>
+<p><a href="/enquiry">← Back to form</a></p>
+</body></html>""",
+        status_code=status_code,
+    )
+
+
+def _enquiry_thank_you() -> HTMLResponse:
+    return HTMLResponse(
+        """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Thank you — Kapila River Front</title>
+<style>body{font-family:Georgia,serif;max-width:28rem;margin:2rem auto;padding:1rem;color:#1c1914;}
+h1{font-size:1.35rem;} a{color:#2d5a3d}</style></head><body>
+<h1>Thank you!</h1>
+<p>We’ve received your enquiry. Our team will contact you shortly on the phone number you provided.</p>
+<p><a href="/enquiry">Submit another enquiry</a></p>
+</body></html>"""
+    )
+
+
+@app.get("/", response_class=HTMLResponse)
+async def root_page():
+    """Landing page with link to the enquiry form."""
+    base = PUBLIC_BASE_URL
+    enquiry_href = f"{base}/enquiry" if base else "/enquiry"
+    safe_href = html.escape(enquiry_href, quote=True)
+    return HTMLResponse(
+        f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Kapila River Front</title>
+<style>body{{font-family:Georgia,serif;max-width:28rem;margin:3rem auto;padding:1.5rem;text-align:center;color:#1c1914;}}
+a{{display:inline-block;margin-top:1rem;color:#2d5a3d;font-weight:600}}</style></head><body>
+<h1>Kapila River Front</h1>
+<p>WhatsApp bot &amp; booking enquiry.</p>
+<p><a href="{safe_href}">Open booking enquiry form</a></p>
+</body></html>"""
+    )
+
+
+@app.get("/enquiry", response_class=HTMLResponse)
+async def enquiry_form_get():
+    """Serve the HTML5 booking enquiry form."""
+    path = os.path.join(BASE_DIR, "static", "enquiry.html")
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="Form not found")
+    with open(path, encoding="utf-8") as f:
+        return HTMLResponse(f.read())
+
+
+@app.post("/enquiry", response_class=HTMLResponse)
+async def enquiry_form_post(
+    name: str = Form(...),
+    phone: str = Form(...),
+    check_in: str = Form(...),
+    check_out: str = Form(...),
+    packs: int = Form(...),
+):
+    """Accept form POST, validate, append one JSON line per submission."""
+    name = (name or "").strip()
+    phone = (phone or "").strip()
+    if len(name) < 2 or len(name) > 120:
+        return _enquiry_form_error("Please enter a valid name (2–120 characters).")
+    if len(phone) < 8 or len(phone) > 20:
+        return _enquiry_form_error("Please enter a valid phone number.")
+
+    try:
+        d_in = date.fromisoformat(check_in)
+        d_out = date.fromisoformat(check_out)
+    except ValueError:
+        return _enquiry_form_error("Invalid check-in or check-out date.")
+
+    if d_out < d_in:
+        return _enquiry_form_error("Check-out must be on or after check-in.")
+
+    if packs < 1 or packs > 30:
+        return _enquiry_form_error("Guests (packs) must be between 1 and 30.")
+
+    record = {
+        "name": name,
+        "phone": phone,
+        "check_in": check_in,
+        "check_out": check_out,
+        "packs": packs,
+    }
+    try:
+        append_enquiry_record(record)
+    except OSError as exc:
+        logger.exception("enquiry       | failed to save: %s", exc)
+        return _enquiry_form_error(
+            "We could not save your enquiry. Please try again or call us.",
+            status_code=500,
+        )
+
+    return _enquiry_thank_you()
+
+
+# ──────────────────────────────────────────────
 # Rule-based reply generator
 # ──────────────────────────────────────────────
 def generate_reply(text: str) -> str:
@@ -179,8 +310,13 @@ def generate_reply(text: str) -> str:
             "❌ *cancel* – Cancellation policy\n"
             "🏦 *payment* – Bank & payment info\n"
             "📋 *menu* – Full keyword list\n"
-            "📞 *call* / *kavitha* – Phone numbers & contact card\n\n"
-            "Or use the buttons — last one is *Call Kavitha* 📞\n\n"
+            "📞 *call* / *kavitha* – Phone numbers & contact card\n"
+            + (
+                f"📝 *Web form:* {PUBLIC_BASE_URL}/enquiry\n\n"
+                if PUBLIC_BASE_URL
+                else ""
+            )
+            + "Or use the buttons — tap *Get callback* for a booking enquiry 📞\n\n"
             "Or just type your question! 😊"
         )
 
@@ -263,9 +399,13 @@ def generate_reply(text: str) -> str:
     # ── Booking enquiry ──
     if any(w in t for w in ("book", "reserve", "checkin", "check-in",
                              "checkout", "check-out")):
+        form_extra = ""
+        if PUBLIC_BASE_URL:
+            form_extra = f"📝 *Submit details online:*\n{PUBLIC_BASE_URL}/enquiry\n\n"
         return (
             "📅 *Booking Enquiry*\n\n"
             "We'd love to host you at Kapila River Front! 🌿\n\n"
+            f"{form_extra}"
             "🕐 *Check-in:* 1:00 PM\n"
             "🕚 *Check-out:* 11:00 AM\n\n"
             "Please share:\n"
@@ -520,6 +660,51 @@ async def send_message(to: str, message: str) -> None:
             logger.error("send_message  | request failed: %s", exc)
 
 
+def parse_chat_date(text: str) -> date | None:
+    """Parse YYYY-MM-DD or DD/MM/YYYY (or DD-MM-YYYY) from chat text."""
+    t = (text or "").strip()
+    if not t:
+        return None
+    try:
+        return date.fromisoformat(t)
+    except ValueError:
+        pass
+    m = re.match(r"^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$", t)
+    if m:
+        d, mo, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        try:
+            return date(y, mo, d)
+        except ValueError:
+            return None
+    return None
+
+
+def validate_enquiry_phone(text: str) -> str | None:
+    """Same rules as the web form: 8–20 chars, must contain a digit."""
+    p = (text or "").strip()
+    if len(p) < 8 or len(p) > 20:
+        return None
+    if not any(c.isdigit() for c in p):
+        return None
+    return p
+
+
+def parse_packs_int(text: str) -> int | None:
+    t = (text or "").strip()
+    try:
+        n = int(t)
+        if 1 <= n <= 30:
+            return n
+    except ValueError:
+        pass
+    m = re.search(r"\b(\d{1,2})\b", t)
+    if m:
+        n = int(m.group(1))
+        if 1 <= n <= 30:
+            return n
+    return None
+
+
 async def send_contact_card(to: str) -> None:
     """Send a vCard-style contact (WhatsApp lets users tap numbers to call)."""
     headers = {
@@ -696,7 +881,7 @@ async def send_button_message(to: str) -> None:
         [
             {"type": "reply", "reply": {"id": "gallery", "title": "Gallery 📸"}},
             {"type": "reply", "reply": {"id": "price", "title": "2026 Rate Card 💰"}},
-            {"type": "reply", "reply": {"id": "contact_kavitha", "title": "Call Kavitha 📞"}},
+            {"type": "reply", "reply": {"id": "callback_start", "title": "Get callback 📞"}},
         ],
     )
 
@@ -753,6 +938,150 @@ async def send_policies_menu(to: str) -> None:
     )
 
 
+async def handle_callback_flow(sender: str, text: str) -> bool:
+    """
+    Multi-step callback: name → phone → check-in → check-out → guests (packs).
+    Returns True if this message was handled in the callback flow.
+    """
+    step = sessions.callback_step_for(sender)
+    if step == sessions.CALLBACK_IDLE:
+        return False
+
+    tl = text.lower().strip()
+    if tl in ("cancel", "stop", "exit", "quit"):
+        sessions.callback_abort(sender)
+        await send_message(
+            sender,
+            "Callback request cancelled. Tap *Get callback* on the menu to start again "
+            "if you need help.",
+        )
+        await send_button_message(sender)
+        return True
+
+    if step == sessions.CALLBACK_NAME:
+        name = text.strip()
+        if len(name) < 2 or len(name) > 120:
+            await send_message(
+                sender,
+                "Please send your *full name* (2–120 characters), or type *cancel* to stop.",
+            )
+            return True
+        sessions.callback_after_name(sender, name)
+        await send_message(
+            sender,
+            "Thanks *"
+            + name.replace("*", "")
+            + "*! 📞\n\n"
+            "Now share your *phone number* (with country code if outside India).\n\n"
+            "Example: `+919876543210` or `9876543210`",
+        )
+        return True
+
+    if step == sessions.CALLBACK_PHONE:
+        phone = validate_enquiry_phone(text)
+        if not phone:
+            await send_message(
+                sender,
+                "Please send a valid phone number (8–20 characters, include digits). "
+                "Or type *cancel*.",
+            )
+            return True
+        sessions.callback_after_phone(sender, phone)
+        await send_message(
+            sender,
+            "📅 *Check-in date*\n\n"
+            "Send the date in *YYYY-MM-DD* (e.g. `2026-04-15`) or *DD/MM/YYYY*.",
+        )
+        return True
+
+    if step == sessions.CALLBACK_CHECKIN:
+        d = parse_chat_date(text)
+        if not d:
+            await send_message(
+                sender,
+                "Please send a valid check-in date (e.g. `2026-04-15` or `15/04/2026`). "
+                "Or *cancel*.",
+            )
+            return True
+        sessions.callback_after_checkin(sender, d.isoformat())
+        await send_message(
+            sender,
+            "📅 *Check-out date*\n\n"
+            "Must be on or after check-in. Same format: `YYYY-MM-DD` or `DD/MM/YYYY`.",
+        )
+        return True
+
+    if step == sessions.CALLBACK_CHECKOUT:
+        d_out = parse_chat_date(text)
+        if not d_out:
+            await send_message(
+                sender,
+                "Please send a valid check-out date. Or *cancel*.",
+            )
+            return True
+        checkin_iso = sessions.callback_get_checkin_iso(sender)
+        try:
+            d_in = date.fromisoformat(checkin_iso)
+        except ValueError:
+            sessions.callback_abort(sender)
+            await send_message(sender, "Something went wrong. Please tap *Get callback* again.")
+            await send_button_message(sender)
+            return True
+        if d_out < d_in:
+            await send_message(
+                sender,
+                "Check-out must be *on or after* check-in "
+                f"({d_in.isoformat()}). Please send a valid date.",
+            )
+            return True
+        sessions.callback_after_checkout(sender, d_out.isoformat())
+        await send_message(
+            sender,
+            "👥 *How many guests?*\n\n"
+            "Send the *total number of people* (1–30).",
+        )
+        return True
+
+    if step == sessions.CALLBACK_PACKS:
+        packs = parse_packs_int(text)
+        if packs is None:
+            await send_message(
+                sender,
+                "Please send a number between *1* and *30* (total guests). Or *cancel*.",
+            )
+            return True
+        record = sessions.callback_make_record(sender, packs)
+        if not record:
+            await send_message(sender, "Could not save your request. Please try *Get callback* again.")
+            await send_button_message(sender)
+            return True
+        try:
+            append_enquiry_record(record)
+        except OSError as exc:
+            logger.exception("callback       | save failed: %s", exc)
+            await send_message(
+                sender,
+                "We could not save your enquiry. Please try sending the guest count again, "
+                "or type *cancel* and start over.",
+            )
+            return True
+        sessions.callback_clear_flow(sender)
+        await send_message(
+            sender,
+            "✅ *Thank you!* We’ve received your callback request:\n\n"
+            f"• *Name:* {record['name']}\n"
+            f"• *Phone:* {record['phone']}\n"
+            f"• *Check-in:* {record['check_in']}\n"
+            f"• *Check-out:* {record['check_out']}\n"
+            f"• *Guests:* {record['packs']}\n\n"
+            "Our team will contact you soon. 🙏",
+        )
+        await send_button_message(sender)
+        return True
+
+    return False
+
+
 # ──────────────────────────────────────────────
 # Handle interactive button clicks
 # ──────────────────────────────────────────────
@@ -760,12 +1089,26 @@ async def handle_button_click(sender: str, button_id: str) -> None:
     """Route logic based on the button ID the user tapped."""
     logger.info("button_click  | from=%s | button_id=%s", sender, button_id)
 
+    if button_id != "callback_start" and sessions.callback_step_for(
+        sender
+    ) != sessions.CALLBACK_IDLE:
+        sessions.callback_abort(sender)
+
     if button_id == "gallery":
         await send_gallery_menu(sender)
 
     elif button_id == "contact_kavitha":
         await send_kavitha_call_help(sender)
         await send_button_message(sender)
+
+    elif button_id == "callback_start":
+        sessions.callback_begin(sender)
+        await send_message(
+            sender,
+            "📞 *Request a callback*\n\n"
+            "Please reply with your *full name* (as you'd like us to use).\n\n"
+            "Type *cancel* any time to stop.",
+        )
 
     elif button_id == "gal_indoor":
         await send_gallery_images(sender, "indoor")
@@ -864,6 +1207,10 @@ async def _dispatch_incoming_message(sender: str, msg: dict) -> None:
         text = (msg.get("text") or {}).get("body") or ""
         logger.info("webhook       | from=%s | text=%s", sender, text)
 
+        if await handle_callback_flow(sender, text):
+            sessions.touch(sender, "text:callback_flow")
+            return
+
         greetings = (
             "hi", "hello", "hey", "hii", "helo",
             "good morning", "good afternoon", "good evening",
@@ -894,6 +1241,15 @@ async def _dispatch_incoming_message(sender: str, msg: dict) -> None:
             sessions.touch(sender, "text:call")
             await send_kavitha_call_help(sender)
             await send_button_message(sender)
+        elif re.search(r"\b(callback|call back)\b", tl, re.I):
+            sessions.touch(sender, "text:callback_start")
+            sessions.callback_begin(sender)
+            await send_message(
+                sender,
+                "📞 *Request a callback*\n\n"
+                "Please reply with your *full name* (as you'd like us to use).\n\n"
+                "Type *cancel* any time to stop.",
+            )
         else:
             sessions.touch(sender, "text:reply")
             reply = generate_reply(text)
