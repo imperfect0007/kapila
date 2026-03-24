@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import sys
 import os
@@ -6,10 +7,13 @@ from contextlib import asynccontextmanager
 from urllib.parse import quote
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request, Query, HTTPException
+from fastapi import FastAPI, Request, Query, HTTPException, Header
 from fastapi.responses import PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 import httpx
+
+import sessions
+import webhook_auth
 
 load_dotenv(".env.local")
 
@@ -30,6 +34,9 @@ logger = logging.getLogger("whatsapp-bot")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "")
 ACCESS_TOKEN = os.getenv("ACCESS_TOKEN", "")
 PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID", "")
+# Meta App Secret – used to verify POST /webhook (X-Hub-Signature-256)
+# Optional: INTERNAL_API_KEY for GET /stats (session counts)
+INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "").strip()
 
 GRAPH_API_URL = (
     f"https://graph.facebook.com/v21.0/{PHONE_NUMBER_ID}/messages"
@@ -122,6 +129,29 @@ else:
 async def ping():
     """Health-check endpoint used by the self-ping task and uptime monitors."""
     return {"status": "alive"}
+
+
+@app.get("/stats")
+async def session_stats(
+    x_api_key: str | None = Header(None, alias="X-API-Key"),
+    authorization: str | None = Header(None),
+):
+    """
+    Optional session metrics (active in-memory sessions).
+    Set INTERNAL_API_KEY in the environment, then call with header:
+    X-API-Key: <key>  OR  Authorization: Bearer <key>
+    """
+    if not INTERNAL_API_KEY:
+        raise HTTPException(status_code=404, detail="Not found")
+    token = None
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+    elif x_api_key:
+        token = x_api_key.strip()
+    if not token or token != INTERNAL_API_KEY:
+        logger.warning("stats         | unauthorized access attempt")
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return sessions.snapshot_stats()
 
 
 # ──────────────────────────────────────────────
@@ -817,78 +847,144 @@ async def verify_webhook(
 # ──────────────────────────────────────────────
 # Webhook receiver (POST)
 # ──────────────────────────────────────────────
+async def _dispatch_incoming_message(sender: str, msg: dict) -> None:
+    """Route one WhatsApp message for a verified sender (wa_id)."""
+    msg_type = msg.get("type") or "unknown"
+
+    if msg_type == "interactive":
+        button_id = (
+            msg.get("interactive", {})
+            .get("button_reply", {})
+            .get("id", "")
+        )
+        sessions.touch(sender, f"btn:{button_id}")
+        await handle_button_click(sender, button_id)
+
+    elif msg_type == "text":
+        text = (msg.get("text") or {}).get("body") or ""
+        logger.info("webhook       | from=%s | text=%s", sender, text)
+
+        greetings = (
+            "hi", "hello", "hey", "hii", "helo",
+            "good morning", "good afternoon", "good evening",
+        )
+        tl = text.lower()
+
+        if text.lower().strip() in greetings:
+            sessions.touch(sender, "text:greeting")
+            await send_button_message(sender)
+        elif any(
+            k in tl
+            for k in ("gallery", "photo", "photos", "picture", "pictures")
+        ):
+            sessions.touch(sender, "text:gallery")
+            logger.info("webhook       | gallery keyword from text")
+            await send_gallery_menu(sender)
+        elif any(w in tl for w in ("menu", "help", "option")):
+            sessions.touch(sender, "text:menu")
+            await send_message(sender, generate_reply("menu"))
+            await send_button_message(sender)
+        elif tl.strip() in ("more", "more options"):
+            sessions.touch(sender, "text:more")
+            await send_more_options(sender)
+        elif any(
+            tl.strip() == w
+            for w in ("call", "kavitha", "contact", "phone", "call kavitha")
+        ) or "call kavitha" in tl:
+            sessions.touch(sender, "text:call")
+            await send_kavitha_call_help(sender)
+            await send_button_message(sender)
+        else:
+            sessions.touch(sender, "text:reply")
+            reply = generate_reply(text)
+            await send_message(sender, reply)
+
+    else:
+        sessions.touch(sender, f"type:{msg_type}")
+        logger.info("webhook       | from=%s | unhandled type=%s", sender, msg_type)
+        await send_message(sender, generate_reply(""))
+        await send_button_message(sender)
+
+    logger.info("webhook       | done wa_id=%s", sender)
+
+
 async def process_webhook_payload(body: dict) -> None:
-    """Handle WhatsApp messages (runs in background after 200 OK)."""
+    """Handle WhatsApp webhook JSON (runs in background after 200 OK)."""
     try:
-        entry = body.get("entry", [])
+        if not isinstance(body, dict):
+            logger.error("webhook       | payload is not an object")
+            return
+
+        entry = body.get("entry")
+        if not isinstance(entry, list):
+            return
+
         for e in entry:
-            changes = e.get("changes", [])
+            changes = e.get("changes") or []
+            if not isinstance(changes, list):
+                continue
             for change in changes:
-                value = change.get("value", {})
-                messages = value.get("messages", [])
+                value = change.get("value") or {}
+
+                for st in value.get("statuses") or []:
+                    logger.info(
+                        "webhook       | delivery status id=%s status=%s",
+                        st.get("id"),
+                        st.get("status"),
+                    )
+
+                messages = value.get("messages") or []
+                if not isinstance(messages, list):
+                    continue
 
                 for msg in messages:
-                    sender = msg.get("from")
-                    msg_type = msg.get("type")
-
-                    if msg_type == "interactive":
-                        button_id = (
-                            msg.get("interactive", {})
-                            .get("button_reply", {})
-                            .get("id", "")
+                    try:
+                        sender = msg.get("from")
+                        if not sender or not isinstance(sender, str):
+                            logger.warning(
+                                "webhook       | skip message without from id=%s",
+                                msg.get("id"),
+                            )
+                            continue
+                        await _dispatch_incoming_message(sender, msg)
+                    except Exception as exc:
+                        logger.exception(
+                            "webhook       | single-message error wa_id=%s: %s",
+                            msg.get("from"),
+                            exc,
                         )
-                        await handle_button_click(sender, button_id)
-
-                    elif msg_type == "text":
-                        text = msg.get("text", {}).get("body", "")
-                        logger.info("webhook       | from=%s | text=%s", sender, text)
-
-                        greetings = ("hi", "hello", "hey", "hii", "helo",
-                                     "good morning", "good afternoon",
-                                     "good evening")
-                        tl = text.lower()
-
-                        if text.lower().strip() in greetings:
-                            await send_button_message(sender)
-                        elif any(
-                            k in tl
-                            for k in ("gallery", "photo", "photos", "picture", "pictures")
-                        ):
-                            logger.info("webhook       | gallery keyword from text")
-                            await send_gallery_menu(sender)
-                        elif any(w in tl for w in ("menu", "help", "option")):
-                            await send_message(sender, generate_reply("menu"))
-                            await send_button_message(sender)
-                        elif tl.strip() in ("more", "more options"):
-                            await send_more_options(sender)
-                        elif any(
-                            tl.strip() == w
-                            for w in ("call", "kavitha", "contact", "phone", "call kavitha")
-                        ) or "call kavitha" in tl:
-                            await send_kavitha_call_help(sender)
-                            await send_button_message(sender)
-                        else:
-                            reply = generate_reply(text)
-                            await send_message(sender, reply)
-
-                    else:
-                        logger.info("webhook       | from=%s | unhandled type=%s", sender, msg_type)
-                        await send_message(sender, generate_reply(""))
-                        await send_button_message(sender)
-
-                    logger.info("webhook       | replied to=%s", sender)
 
     except Exception as exc:
-        logger.exception("webhook       | error processing message: %s", exc)
+        logger.exception("webhook       | error processing payload: %s", exc)
 
 
 @app.post("/webhook")
 async def receive_webhook(request: Request):
     """
-    Receives incoming messages from WhatsApp.
-    Responds immediately so Meta does not time out during gallery sends.
+    WhatsApp Cloud API webhook. Verifies Meta signature when APP_SECRET is set.
+    Returns 200 quickly; work continues in a background task.
     """
-    body = await request.json()
-    logger.info("webhook       | incoming payload: %s", body)
+    raw_body = await request.body()
+    sig = request.headers.get("X-Hub-Signature-256") or request.headers.get(
+        "x-hub-signature-256"
+    )
+
+    if not webhook_auth.verify_webhook_signature(raw_body, sig):
+        logger.warning("webhook       | rejected: invalid or missing signature")
+        raise HTTPException(status_code=403, detail="Invalid signature")
+
+    try:
+        body = json.loads(raw_body.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        logger.error("webhook       | invalid JSON: %s", exc)
+        raise HTTPException(status_code=400, detail="Invalid JSON") from exc
+
+    if body.get("object") != "whatsapp_business_account":
+        logger.info(
+            "webhook       | ignored object=%s", body.get("object"),
+        )
+        return {"status": "ignored"}
+
+    logger.debug("webhook       | incoming payload: %s", body)
     asyncio.create_task(process_webhook_payload(body))
     return {"status": "ok"}
