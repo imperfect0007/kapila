@@ -682,7 +682,15 @@ def format_desk_enquiry_alert(payload: dict, source_label: str) -> str:
         return str(s or "").replace("*", "").replace("_", "").strip()
 
     name = _plain(payload.get("name"))
-    phone = _plain(payload.get("phone"))
+    # Make the phone easier to dial: show as +<countrycode><number> when possible.
+    raw_phone = _plain(payload.get("phone"))
+    phone_digits = _normalize_whatsapp_digits(raw_phone)
+    if len(phone_digits) == 10:
+        phone = "+91" + phone_digits
+    elif len(phone_digits) >= 11:
+        phone = "+" + phone_digits
+    else:
+        phone = raw_phone
     cin = _plain(payload.get("check_in"))
     cout = _plain(payload.get("check_out"))
     packs = payload.get("packs", "")
