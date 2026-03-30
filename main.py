@@ -1250,9 +1250,13 @@ async def handle_button_click(sender: str, button_id: str) -> None:
     """Route logic based on the button ID the user tapped."""
     logger.info("button_click  | from=%s | button_id=%s", sender, button_id)
 
-    if button_id != "callback_start" and sessions.callback_step_for(
-        sender
-    ) != sessions.CALLBACK_IDLE:
+    _CALLBACK_STARTING_BUTTONS = {
+        "room_booking", "venue_booking", "visit", "callback_start",
+    }
+    if (
+        button_id not in _CALLBACK_STARTING_BUTTONS
+        and sessions.callback_step_for(sender) != sessions.CALLBACK_IDLE
+    ):
         sessions.callback_abort(sender)
 
     if button_id == "gallery":
