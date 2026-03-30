@@ -17,11 +17,15 @@ SESSION_TTL = timedelta(hours=24)
 
 # WhatsApp “Get callback” multi-step flow (per wa_id)
 CALLBACK_IDLE = "idle"
+CALLBACK_MODE_BOOKING = "booking"
+CALLBACK_MODE_PROPERTY_VISIT = "property_visit"
+
 CALLBACK_NAME = "name"
 CALLBACK_PHONE = "phone"
 CALLBACK_CHECKIN = "checkin"
 CALLBACK_CHECKOUT = "checkout"
 CALLBACK_PACKS = "packs"
+CALLBACK_PROPERTY_FINALIZE = "property_finalize"
 
 
 def _utcnow() -> datetime:
@@ -35,6 +39,7 @@ class UserSession:
     message_count: int = 0
     last_flow: str = ""
     callback_step: str = CALLBACK_IDLE
+    callback_mode: str = CALLBACK_MODE_BOOKING
     cb_name: str = ""
     cb_phone: str = ""
     cb_checkin: str = ""  # YYYY-MM-DD
@@ -100,8 +105,15 @@ def callback_step_for(wa_id: str) -> str:
         return s.callback_step if s else CALLBACK_IDLE
 
 
+def callback_mode_for(wa_id: str) -> str:
+    with _lock:
+        s = _sessions.get(wa_id)
+        return s.callback_mode if s else CALLBACK_MODE_BOOKING
+
+
 def _callback_reset_unlocked(s: UserSession) -> None:
     s.callback_step = CALLBACK_IDLE
+    s.callback_mode = CALLBACK_MODE_BOOKING
     s.cb_name = s.cb_phone = s.cb_checkin = s.cb_checkout = ""
 
 
@@ -113,7 +125,7 @@ def callback_abort(wa_id: str) -> None:
             s.updated_at = _utcnow()
 
 
-def callback_begin(wa_id: str) -> None:
+def callback_begin(wa_id: str, mode: str = CALLBACK_MODE_BOOKING) -> None:
     with _lock:
         _prune_stale_unlocked()
         s = _sessions.get(wa_id)
@@ -121,6 +133,7 @@ def callback_begin(wa_id: str) -> None:
             s = UserSession(wa_id=wa_id)
             _sessions[wa_id] = s
         s.callback_step = CALLBACK_NAME
+        s.callback_mode = mode
         s.cb_name = s.cb_phone = s.cb_checkin = s.cb_checkout = ""
         s.updated_at = _utcnow()
 
@@ -141,7 +154,10 @@ def callback_after_phone(wa_id: str, phone: str) -> None:
         if not s:
             return
         s.cb_phone = phone
-        s.callback_step = CALLBACK_CHECKIN
+        if s.callback_mode == CALLBACK_MODE_PROPERTY_VISIT:
+            s.callback_step = CALLBACK_PROPERTY_FINALIZE
+        else:
+            s.callback_step = CALLBACK_CHECKIN
         s.updated_at = _utcnow()
 
 
@@ -184,6 +200,26 @@ def callback_make_record(wa_id: str, packs: int) -> dict | None:
             "check_out": s.cb_checkout,
             "packs": packs,
             "source": "whatsapp_callback",
+        }
+
+
+def callback_make_property_visit_record(wa_id: str) -> dict | None:
+    """Build an enquiry payload for property visits (does not clear state)."""
+    with _lock:
+        s = _sessions.get(wa_id)
+        if not s or s.callback_mode != CALLBACK_MODE_PROPERTY_VISIT:
+            return None
+        return {
+            "name": s.cb_name,
+            "phone": s.cb_phone,
+            "visit_purpose": "Property visit",
+            # Values from your requirement:
+            "fnq": 1,
+            "rooms": 5,
+            "occupancy": 15,
+            "tent_extra_packs": 2,
+            "walkin_available": False,
+            "source": "whatsapp_property_visit",
         }
 
 

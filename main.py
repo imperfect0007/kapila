@@ -691,18 +691,51 @@ def format_desk_enquiry_alert(payload: dict, source_label: str) -> str:
         phone = "+" + phone_digits
     else:
         phone = raw_phone
+    visit_purpose = _plain(payload.get("visit_purpose"))
+    fnq = payload.get("fnq", "")
+    rooms = payload.get("rooms", "")
+    occupancy = payload.get("occupancy", "")
+    tent_extra_packs = payload.get("tent_extra_packs", "")
+    walkin_available = payload.get("walkin_available", "")
+
     cin = _plain(payload.get("check_in"))
     cout = _plain(payload.get("check_out"))
     packs = payload.get("packs", "")
-    return (
-        "🔔 *New enquiry — please call guest*\n\n"
-        f"📋 *Source:* {source_label}\n\n"
-        f"👤 *Name:* {name}\n"
-        f"📞 *Phone:* {phone}\n"
-        f"📅 *Check-in:* {cin}\n"
-        f"📅 *Check-out:* {cout}\n"
-        f"👥 *Total guests:* {packs}\n"
-    )
+
+    lines: list[str] = []
+    lines.append("🔔 *New enquiry — please call guest*")
+    lines.append("")
+    lines.append(f"📋 *Source:* {source_label}")
+    lines.append("")
+    lines.append(f"👤 *Name:* {name}")
+    lines.append(f"📞 *Phone:* {phone}")
+
+    if visit_purpose:
+        lines.append(f"📝 *Visit purpose:* {visit_purpose}")
+
+    # Booking enquiry fields
+    if cin:
+        lines.append(f"📅 *Check-in:* {cin}")
+    if cout:
+        lines.append(f"📅 *Check-out:* {cout}")
+    if packs not in ("", None):
+        lines.append(f"👥 *Total guests:* {packs}")
+
+    # Property visit fields (your desk needs these)
+    if fnq not in ("", None):
+        lines.append(f"🔢 *FNQ:* {fnq}")
+    if rooms not in ("", None) and rooms != "":
+        lines.append(f"🏠 *Number of rooms:* {rooms}")
+    if occupancy not in ("", None) and occupancy != "":
+        lines.append(f"👥 *Total occupancy:* {occupancy} members")
+    if tent_extra_packs not in ("", None) and tent_extra_packs != "":
+        lines.append(f"⛺ *Tent extra:* {tent_extra_packs} packs")
+    if walkin_available not in ("", None):
+        lines.append(
+            f"🚶 *Walk-in:* {'Available' if bool(walkin_available) else 'Not available'}"
+        )
+
+    return "\n".join(lines) + "\n"
 
 
 async def notify_desk_staff(payload: dict, source_label: str) -> None:
@@ -1067,6 +1100,37 @@ async def handle_callback_flow(sender: str, text: str) -> bool:
             )
             return True
         sessions.callback_after_phone(sender, phone)
+        # For property-visit enquiries we finalize immediately after phone.
+        if sessions.callback_mode_for(sender) == sessions.CALLBACK_MODE_PROPERTY_VISIT:
+            record = sessions.callback_make_property_visit_record(sender)
+            if not record:
+                await send_message(sender, "Could not create your request. Please tap *Get callback* again.")
+                await send_button_message(sender)
+                return True
+            try:
+                append_enquiry_record(record)
+            except OSError as exc:
+                logger.exception("property_visit | save failed: %s", exc)
+                sessions.callback_clear_flow(sender)
+                await send_message(
+                    sender,
+                    "We could not save your enquiry. Please try again or contact us.",
+                )
+                await send_button_message(sender)
+                return True
+            sessions.callback_clear_flow(sender)
+            await notify_desk_staff(record, "Property visit (WhatsApp)")
+            await send_message(
+                sender,
+                "✅ *Thank you!* We received your *property visit* request.\n\n"
+                f"• *Name:* {record['name']}\n"
+                f"• *Phone:* {record['phone']}\n\n"
+                "Our team will contact you soon. 🙏",
+            )
+            await send_button_message(sender)
+            return True
+
+        # Booking enquiry: continue with dates.
         await send_message(
             sender,
             "📅 *Check-in date*\n\n"
@@ -1322,9 +1386,24 @@ async def _dispatch_incoming_message(sender: str, msg: dict) -> None:
             sessions.touch(sender, "text:call")
             await send_kavitha_call_help(sender)
             await send_button_message(sender)
+        elif re.search(
+            r"(property\s*visit|property\s*view|property\s*visite|visit\s*property|proe?r(?:y)?\s*vis|proery\s*vis|proe?r.*visite)",
+            tl,
+            re.I,
+        ):
+            sessions.touch(sender, "text:property_visit_start")
+            sessions.callback_begin(
+                sender, sessions.CALLBACK_MODE_PROPERTY_VISIT
+            )
+            await send_message(
+                sender,
+                "📞 *Property visit request*\n\n"
+                "Please reply with your *full name* (as you'd like us to use).\n\n"
+                "Type *cancel* any time to stop.",
+            )
         elif re.search(r"\b(callback|call back)\b", tl, re.I):
             sessions.touch(sender, "text:callback_start")
-            sessions.callback_begin(sender)
+            sessions.callback_begin(sender, sessions.CALLBACK_MODE_BOOKING)
             await send_message(
                 sender,
                 "📞 *Request a callback*\n\n"
