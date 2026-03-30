@@ -17,7 +17,10 @@ SESSION_TTL = timedelta(hours=24)
 
 # WhatsApp “Get callback” multi-step flow (per wa_id)
 CALLBACK_IDLE = "idle"
-CALLBACK_MODE_BOOKING = "booking"
+CALLBACK_MODE_ROOM = "room_booking"
+CALLBACK_MODE_VENUE = "venue_booking"
+CALLBACK_MODE_DAYOUT = "day_out"
+CALLBACK_MODE_BOOKING = "booking"  # legacy alias
 CALLBACK_MODE_PROPERTY_VISIT = "property_visit"
 
 CALLBACK_NAME = "name"
@@ -193,13 +196,18 @@ def callback_make_record(wa_id: str, packs: int) -> dict | None:
         s = _sessions.get(wa_id)
         if not s or s.callback_step != CALLBACK_PACKS:
             return None
+        source_map = {
+            CALLBACK_MODE_ROOM: "whatsapp_room_booking",
+            CALLBACK_MODE_VENUE: "whatsapp_venue_booking",
+            CALLBACK_MODE_DAYOUT: "whatsapp_day_out",
+        }
         return {
             "name": s.cb_name,
             "phone": s.cb_phone,
             "check_in": s.cb_checkin,
             "check_out": s.cb_checkout,
             "packs": packs,
-            "source": "whatsapp_callback",
+            "source": source_map.get(s.callback_mode, "whatsapp_callback"),
         }
 
 

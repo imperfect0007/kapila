@@ -787,18 +787,18 @@ def validate_enquiry_phone(text: str) -> str | None:
     return p
 
 
-def parse_packs_int(text: str) -> int | None:
+def parse_packs_int(text: str, min_val: int = 1, max_val: int = 17) -> int | None:
     t = (text or "").strip()
     try:
         n = int(t)
-        if 1 <= n <= 30:
+        if min_val <= n <= max_val:
             return n
     except ValueError:
         pass
-    m = re.search(r"\b(\d{1,2})\b", t)
+    m = re.search(r"\b(\d{1,3})\b", t)
     if m:
         n = int(m.group(1))
-        if 1 <= n <= 30:
+        if min_val <= n <= max_val:
             return n
     return None
 
@@ -1198,21 +1198,35 @@ async def handle_callback_flow(sender: str, text: str) -> bool:
         await send_message(
             sender,
             "👥 *How many guests?*\n\n"
-            "Send the *total number of people* (1–30).",
+            + (
+                "Send the *total number of people* (50–250)."
+                if sessions.callback_mode_for(sender) == sessions.CALLBACK_MODE_VENUE
+                else "Send the *total number of people* (min 10)."
+                if sessions.callback_mode_for(sender) == sessions.CALLBACK_MODE_DAYOUT
+                else "Send the *total number of people* (1–17)."
+            ),
         )
         return True
 
     if step == sessions.CALLBACK_PACKS:
-        packs = parse_packs_int(text)
+        mode = sessions.callback_mode_for(sender)
+        if mode == sessions.CALLBACK_MODE_VENUE:
+            min_g, max_g, label = 50, 250, "50\u2013250"
+        elif mode == sessions.CALLBACK_MODE_DAYOUT:
+            min_g, max_g, label = 10, 500, "at least 10"
+        else:
+            min_g, max_g, label = 1, 17, "1\u201317"
+
+        packs = parse_packs_int(text, min_val=min_g, max_val=max_g)
         if packs is None:
             await send_message(
                 sender,
-                "Please send a number between *1* and *30* (total guests). Or *cancel*.",
+                f"Please send a number (*{label}* guests). Or *cancel*.",
             )
             return True
         record = sessions.callback_make_record(sender, packs)
         if not record:
-            await send_message(sender, "Could not save your request. Please try *Room Booking* again.")
+            await send_message(sender, "Could not save your request. Please try *Booking* again.")
             await send_button_message(sender)
             return True
         try:
@@ -1226,10 +1240,15 @@ async def handle_callback_flow(sender: str, text: str) -> bool:
             )
             return True
         sessions.callback_clear_flow(sender)
-        await notify_desk_staff(record, "WhatsApp callback")
+        _src = {
+            sessions.CALLBACK_MODE_ROOM: "Room booking (WhatsApp)",
+            sessions.CALLBACK_MODE_VENUE: "Venue booking (WhatsApp)",
+            sessions.CALLBACK_MODE_DAYOUT: "Day out (WhatsApp)",
+        }
+        await notify_desk_staff(record, _src.get(mode, "WhatsApp callback"))
         await send_message(
             sender,
-            "✅ *Thank you!* We’ve received your callback request:\n\n"
+            "✅ *Thank you!* We’ve received your booking enquiry:\n\n"
             f"• *Name:* {record['name']}\n"
             f"• *Phone:* {record['phone']}\n"
             f"• *Check-in:* {record['check_in']}\n"
@@ -1251,7 +1270,7 @@ async def handle_button_click(sender: str, button_id: str) -> None:
     logger.info("button_click  | from=%s | button_id=%s", sender, button_id)
 
     _CALLBACK_STARTING_BUTTONS = {
-        "room_booking", "venue_booking", "visit", "callback_start",
+        "room_booking", "venue_booking", "day_out", "visit", "callback_start",
     }
     if (
         button_id not in _CALLBACK_STARTING_BUTTONS
@@ -1283,26 +1302,34 @@ async def handle_button_click(sender: str, button_id: str) -> None:
 
     # ── Booking sub-menu buttons ──
     elif button_id == "room_booking":
-        sessions.callback_begin(sender, sessions.CALLBACK_MODE_BOOKING)
+        sessions.callback_begin(sender, sessions.CALLBACK_MODE_ROOM)
         await send_message(
             sender,
-            "🛏 *Room booking enquiry*\n\n"
+            "🛏 *Room booking enquiry*\n"
+            "_(max 17 guests)_\n\n"
             "Please reply with your *full name*.\n\n"
             "Type *cancel* any time to stop.",
         )
 
     elif button_id == "venue_booking":
-        sessions.callback_begin(sender, sessions.CALLBACK_MODE_BOOKING)
+        sessions.callback_begin(sender, sessions.CALLBACK_MODE_VENUE)
         await send_message(
             sender,
-            "💼 *Venue booking*\n\n"
+            "💼 *Venue booking*\n"
+            "_(50–250 guests)_\n\n"
             "Please reply with your *full name*.\n\n"
             "Type *cancel* any time to stop.",
         )
 
     elif button_id == "day_out":
-        await send_message(sender, generate_reply("activities"))
-        await send_booking_menu(sender)
+        sessions.callback_begin(sender, sessions.CALLBACK_MODE_DAYOUT)
+        await send_message(
+            sender,
+            "🌿 *Day Out booking*\n"
+            "_(min 10 people)_\n\n"
+            "Please reply with your *full name*.\n\n"
+            "Type *cancel* any time to stop.",
+        )
 
     # ── More sub-menu buttons ──
     elif button_id == "faq":
@@ -1322,7 +1349,7 @@ async def handle_button_click(sender: str, button_id: str) -> None:
         await send_gallery_menu(sender)
 
     elif button_id == "callback_start":
-        sessions.callback_begin(sender, sessions.CALLBACK_MODE_BOOKING)
+        sessions.callback_begin(sender, sessions.CALLBACK_MODE_ROOM)
         await send_message(
             sender,
             "📞 *Get a callback*\n\n"
