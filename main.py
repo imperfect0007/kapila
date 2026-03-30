@@ -328,7 +328,7 @@ def generate_reply(text: str) -> str:
                 if PUBLIC_BASE_URL
                 else ""
             )
-            + "Or use the buttons — tap *Get callback* for a booking enquiry 📞\n\n"
+            + "Or use the buttons — tap *Room Booking* for a booking enquiry 📞\n\n"
             "Or just type your question! 😊"
         )
 
@@ -985,16 +985,16 @@ async def _send_interactive(to: str, body_text: str, buttons: list[dict]) -> Non
 
 
 async def send_button_message(to: str) -> None:
-    """Main welcome menu – shown on greeting."""
+    """Main welcome menu (home) – shown on greeting."""
     await _send_interactive(
         to,
         "Welcome to *Kapila River Front*! 🌿🏨\n"
         "A Luxury Farm Villa on the Riverside\n\n"
-        "How may I assist you today?",
+        "Choose what you need:",
         [
-            {"type": "reply", "reply": {"id": "gallery", "title": "Gallery 📸"}},
-            {"type": "reply", "reply": {"id": "price", "title": "2026 Rate Card 💰"}},
-            {"type": "reply", "reply": {"id": "callback_start", "title": "Get callback 📞"}},
+            {"type": "reply", "reply": {"id": "room_booking", "title": "Room Booking 🛏"}},
+            {"type": "reply", "reply": {"id": "day_out", "title": "Day Out 🌿"}},
+            {"type": "reply", "reply": {"id": "more", "title": "More"}},  # keep <=20
         ],
     )
 
@@ -1013,14 +1013,27 @@ async def send_gallery_menu(to: str) -> None:
 
 
 async def send_more_options(to: str) -> None:
-    """Second menu – room details, activities, pets, policies."""
+    """More menu (2nd page): Venue Booking / FAQ / Gallery."""
     await _send_interactive(
         to,
-        "More about *Kapila River Front* 🌿",
+        "More options 🌿",
         [
-            {"type": "reply", "reply": {"id": "room", "title": "Room Details 🛏"}},
-            {"type": "reply", "reply": {"id": "activities", "title": "Activities 🎯"}},
-            {"type": "reply", "reply": {"id": "pet_policies", "title": "Pet & Policies 🐾"}},
+            {"type": "reply", "reply": {"id": "venue_booking", "title": "Venue Booking 💼"}},
+            {"type": "reply", "reply": {"id": "faq", "title": "FAQ ❓"}},
+            {"type": "reply", "reply": {"id": "gallery", "title": "Gallery 📸"}},
+        ],
+    )
+
+
+async def send_visit_about_menu(to: str) -> None:
+    """Visit/About submenu (3rd page). Meta limit is 3 buttons only."""
+    await _send_interactive(
+        to,
+        "Visit & About",
+        [
+            {"type": "reply", "reply": {"id": "visit", "title": "Visit 🏡"}},
+            {"type": "reply", "reply": {"id": "about", "title": "About ℹ️"}},
+            {"type": "reply", "reply": {"id": "more", "title": "Back ↩️"}},
         ],
     )
 
@@ -1065,7 +1078,7 @@ async def handle_callback_flow(sender: str, text: str) -> bool:
         sessions.callback_abort(sender)
         await send_message(
             sender,
-            "Callback request cancelled. Tap *Get callback* on the menu to start again "
+            "Callback request cancelled. Tap *Room Booking* on the menu to start again "
             "if you need help.",
         )
         await send_button_message(sender)
@@ -1104,7 +1117,10 @@ async def handle_callback_flow(sender: str, text: str) -> bool:
         if sessions.callback_mode_for(sender) == sessions.CALLBACK_MODE_PROPERTY_VISIT:
             record = sessions.callback_make_property_visit_record(sender)
             if not record:
-                await send_message(sender, "Could not create your request. Please tap *Get callback* again.")
+                await send_message(
+                    sender,
+                    "Could not create your request. Please tap *Room Booking* again.",
+                )
                 await send_button_message(sender)
                 return True
             try:
@@ -1168,7 +1184,7 @@ async def handle_callback_flow(sender: str, text: str) -> bool:
             d_in = date.fromisoformat(checkin_iso)
         except ValueError:
             sessions.callback_abort(sender)
-            await send_message(sender, "Something went wrong. Please tap *Get callback* again.")
+            await send_message(sender, "Something went wrong. Please tap *Room Booking* again.")
             await send_button_message(sender)
             return True
         if d_out < d_in:
@@ -1196,7 +1212,7 @@ async def handle_callback_flow(sender: str, text: str) -> bool:
             return True
         record = sessions.callback_make_record(sender, packs)
         if not record:
-            await send_message(sender, "Could not save your request. Please try *Get callback* again.")
+            await send_message(sender, "Could not save your request. Please try *Room Booking* again.")
             await send_button_message(sender)
             return True
         try:
@@ -1242,15 +1258,28 @@ async def handle_button_click(sender: str, button_id: str) -> None:
     if button_id == "gallery":
         await send_gallery_menu(sender)
 
+    elif button_id == "room_booking":
+        sessions.callback_begin(sender, sessions.CALLBACK_MODE_BOOKING)
+        await send_message(
+            sender,
+            "📞 *Room booking enquiry*\n\n"
+            "Please reply with your *full name*.\n\n"
+            "Type *cancel* any time to stop.",
+        )
+
+    elif button_id == "day_out":
+        await send_message(sender, generate_reply("activities"))
+        await send_more_options(sender)
+
     elif button_id == "contact_kavitha":
         await send_kavitha_call_help(sender)
         await send_button_message(sender)
 
     elif button_id == "callback_start":
-        sessions.callback_begin(sender)
+        sessions.callback_begin(sender, sessions.CALLBACK_MODE_BOOKING)
         await send_message(
             sender,
-            "📞 *Request a callback*\n\n"
+            "📞 *Room booking enquiry*\n\n"
             "Please reply with your *full name* (as you'd like us to use).\n\n"
             "Type *cancel* any time to stop.",
         )
@@ -1293,6 +1322,44 @@ async def handle_button_click(sender: str, button_id: str) -> None:
 
     elif button_id == "pet_policies":
         await send_pet_policies_menu(sender)
+
+    elif button_id == "venue_booking":
+        sessions.callback_begin(sender, sessions.CALLBACK_MODE_BOOKING)
+        await send_message(
+            sender,
+            "💼 *Venue booking*\n\n"
+            "Please reply with your *full name*.",
+        )
+
+    elif button_id == "faq":
+        await send_message(
+            sender,
+            "❓ *FAQ*\n\n"
+            "To get quick details, use these options:\n"
+            "• *Room booking* (dates + total guests)\n"
+            "• *Payment* (bank details)\n"
+            "• *Cancellation* (policy)\n"
+            "• *Pet policy* (charges & rules)\n\n"
+            "If you want a callback, use *Room booking*.",
+        )
+        await send_visit_about_menu(sender)
+
+    elif button_id == "visit":
+        sessions.callback_begin(sender, sessions.CALLBACK_MODE_PROPERTY_VISIT)
+        await send_message(
+            sender,
+            "🏡 *Property visit enquiry*\n\n"
+            "Please reply with your *name*.",
+        )
+
+    elif button_id == "about":
+        await send_message(
+            sender,
+            "ℹ️ *About Kapila River Front*\n\n"
+            "A Luxury Farm Villa on the Riverside — calm, green, and perfect for a peaceful stay and group experiences.\n\n"
+            "For visit enquiry, tap *Visit*.",
+        )
+        await send_visit_about_menu(sender)
 
     elif button_id == "policies":
         await send_policies_menu(sender)
