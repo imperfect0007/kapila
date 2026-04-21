@@ -1081,7 +1081,6 @@ async def handle_callback_flow(sender: str, text: str) -> bool:
             "Callback request cancelled. Tap *Room Booking* on the menu to start again "
             "if you need help.",
         )
-        await send_button_message(sender)
         return True
 
     if step == sessions.CALLBACK_NAME:
@@ -1101,7 +1100,7 @@ async def handle_callback_flow(sender: str, text: str) -> bool:
             + name.replace("*", "")
             + "*! 📞\n\n"
             "Now share your *phone number* (with country code if outside India).\n\n"
-            "Example: `+919876543210` or `9876543210`",
+            "Please type only your phone number.",
         )
         return True
 
@@ -1123,7 +1122,6 @@ async def handle_callback_flow(sender: str, text: str) -> bool:
                     sender,
                     "Could not create your request. Please tap *Room Booking* again.",
                 )
-                await send_button_message(sender)
                 return True
             try:
                 append_enquiry_record(record)
@@ -1134,7 +1132,6 @@ async def handle_callback_flow(sender: str, text: str) -> bool:
                     sender,
                     "We could not save your enquiry. Please try again or contact us.",
                 )
-                await send_button_message(sender)
                 return True
             sessions.callback_clear_flow(sender)
             await notify_desk_staff(record, "Property visit (WhatsApp)")
@@ -1145,7 +1142,6 @@ async def handle_callback_flow(sender: str, text: str) -> bool:
                 f"• *Phone:* {record['phone']}\n\n"
                 "Our team will contact you soon. 🙏",
             )
-            await send_button_message(sender)
             return True
 
         # Booking enquiry: continue with dates.
@@ -1194,7 +1190,6 @@ async def handle_callback_flow(sender: str, text: str) -> bool:
         except ValueError:
             sessions.callback_abort(sender)
             await send_message(sender, "Something went wrong. Please tap *Room Booking* again.")
-            await send_button_message(sender)
             return True
         if d_out < d_in:
             await send_message(
@@ -1236,7 +1231,6 @@ async def handle_callback_flow(sender: str, text: str) -> bool:
         record = sessions.callback_make_record(sender, packs)
         if not record:
             await send_message(sender, "Could not save your request. Please try *Booking* again.")
-            await send_button_message(sender)
             return True
         try:
             append_enquiry_record(record)
@@ -1268,7 +1262,6 @@ async def handle_callback_flow(sender: str, text: str) -> bool:
             sender,
             summary,
         )
-        await send_button_message(sender)
         return True
 
     return False
