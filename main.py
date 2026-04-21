@@ -1086,10 +1086,12 @@ async def handle_callback_flow(sender: str, text: str) -> bool:
 
     if step == sessions.CALLBACK_NAME:
         name = text.strip()
-        if len(name) < 2 or len(name) > 120:
+        has_letter = any(ch.isalpha() for ch in name)
+        if len(name) < 2 or len(name) > 120 or not has_letter:
             await send_message(
                 sender,
-                "Please send your *full name* (2–120 characters), or type *cancel* to stop.",
+                "Please type your *name* (not only numbers). "
+                "Use 2-120 characters, or type *cancel* to stop.",
             )
             return True
         sessions.callback_after_name(sender, name)
@@ -1164,6 +1166,13 @@ async def handle_callback_flow(sender: str, text: str) -> bool:
             )
             return True
         sessions.callback_after_checkin(sender, d.isoformat())
+        if sessions.callback_mode_for(sender) == sessions.CALLBACK_MODE_DAYOUT:
+            await send_message(
+                sender,
+                "👥 *How many guests?*\n\n"
+                "Send the *total number of people* (min 10).",
+            )
+            return True
         await send_message(
             sender,
             "📅 *Check-out date*\n\n"
@@ -1246,15 +1255,18 @@ async def handle_callback_flow(sender: str, text: str) -> bool:
             sessions.CALLBACK_MODE_DAYOUT: "Day out (WhatsApp)",
         }
         await notify_desk_staff(record, _src.get(mode, "WhatsApp callback"))
-        await send_message(
-            sender,
+        summary = (
             "✅ *Thank you!* We’ve received your booking enquiry:\n\n"
             f"• *Name:* {record['name']}\n"
             f"• *Phone:* {record['phone']}\n"
             f"• *Check-in:* {record['check_in']}\n"
-            f"• *Check-out:* {record['check_out']}\n"
-            f"• *Guests:* {record['packs']}\n\n"
-            "Our team will contact you soon. 🙏",
+            + (f"• *Check-out:* {record['check_out']}\n" if record.get("check_out") else "")
+            + f"• *Guests:* {record['packs']}\n\n"
+            + "Our team will contact you soon. 🙏"
+        )
+        await send_message(
+            sender,
+            summary,
         )
         await send_button_message(sender)
         return True

@@ -170,7 +170,12 @@ def callback_after_checkin(wa_id: str, checkin_iso: str) -> None:
         if not s:
             return
         s.cb_checkin = checkin_iso
-        s.callback_step = CALLBACK_CHECKOUT
+        if s.callback_mode == CALLBACK_MODE_DAYOUT:
+            # Day-out is a single-day flow: no separate check-out step.
+            s.cb_checkout = ""
+            s.callback_step = CALLBACK_PACKS
+        else:
+            s.callback_step = CALLBACK_CHECKOUT
         s.updated_at = _utcnow()
 
 
